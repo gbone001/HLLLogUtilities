@@ -103,4 +103,33 @@ async def reload(ctx: commands.Context, cog: str = None):
         else:
             await ctx.send(f"{cog} doesn't exist")
 
-bot.run(get_config()['Bot']['Token'])
+def _resolve_token() -> str:
+    """Resolve the Discord bot token from env or config.
+
+    Order: `DISCORD_TOKEN`, `BOT_TOKEN`, then `[Bot].Token` from `config.ini`.
+    Strips a leading "Bot " prefix if mistakenly included.
+    Exits with a clear message if no token is found.
+    """
+    token = (
+        os.getenv("DISCORD_TOKEN")
+        or os.getenv("BOT_TOKEN")
+        or get_config().get("Bot", "Token", fallback="")
+    ).strip()
+
+    if token.lower().startswith("bot "):
+        token = token[4:].strip()
+
+    if not token:
+        print(
+            "ERROR: No Discord bot token provided.\n"
+            "- Set DISCORD_TOKEN or BOT_TOKEN env var, or\n"
+            "- Add it under [Bot].Token in config.ini\n"
+            "Never share this token publicly."
+        )
+        import sys
+        sys.exit(1)
+
+    return token
+
+
+bot.run(_resolve_token())
