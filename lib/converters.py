@@ -6,13 +6,24 @@ from typing import List, Union
 
 from lib.storage import LogLine, HLU_VERSION
 from lib.scores import MatchGroup, MatchData, create_scoreboard
+from lib.tank_scoreboard import (
+    TankScoreboardResult,
+    render_tank_scoreboard,
+    tank_scoreboard_to_csv,
+)
 
 __all__ = (
     'ExportFormats',
+    'ScoreboardMode',
     'TextConverter',
     'CSVConverter',
     'JSONConverter',
 )
+
+
+class ScoreboardMode(Enum):
+    standard = "standard"
+    tank = "tank"
 
 class Converter:
     player_join_server=...
@@ -82,7 +93,13 @@ class Converter:
         return "\n".join(lines)
 
     @classmethod
-    def create_scoreboard(cls, scores: Union['MatchData', 'MatchGroup']):
+    def create_scoreboard(
+        cls,
+        scores: Union['MatchData', 'MatchGroup', TankScoreboardResult],
+        mode: 'ScoreboardMode' = ScoreboardMode.standard,
+    ):
+        if mode == ScoreboardMode.tank:
+            raise NotImplementedError("Tank scoreboard rendering is not implemented for this converter")
         return create_scoreboard(scores)
 
 class TextConverter(Converter):
@@ -164,6 +181,18 @@ class TextConverter(Converter):
         
         return "\n".join(lines)
 
+    @classmethod
+    def create_scoreboard(
+        cls,
+        scores: Union['MatchData', 'MatchGroup', TankScoreboardResult],
+        mode: 'ScoreboardMode' = ScoreboardMode.standard,
+    ):
+        if mode == ScoreboardMode.tank:
+            if isinstance(scores, TankScoreboardResult):
+                return render_tank_scoreboard(scores)
+            raise ValueError("Expected TankScoreboardResult for tank mode")
+        return super().create_scoreboard(scores, mode)
+
 
 class CSVConverter(Converter):
     @classmethod
@@ -181,7 +210,15 @@ class CSVConverter(Converter):
         return 'csv'
     
     @classmethod
-    def create_scoreboard(cls, scores: Union['MatchData', 'MatchGroup']):
+    def create_scoreboard(
+        cls,
+        scores: Union['MatchData', 'MatchGroup', TankScoreboardResult],
+        mode: 'ScoreboardMode' = ScoreboardMode.standard,
+    ):
+        if mode == ScoreboardMode.tank:
+            if isinstance(scores, TankScoreboardResult):
+                return tank_scoreboard_to_csv(scores)
+            raise ValueError("Expected TankScoreboardResult for tank mode")
         stats = scores.stats if isinstance(scores, MatchGroup) else scores
         return stats.to_csv()
 
@@ -205,8 +242,20 @@ class JSONConverter(Converter):
         return json.dumps(obj, indent=2, default=lambda x: x.isoformat() if isinstance(x, datetime) else str(x))
     
     @classmethod
-    def create_scoreboard(cls, scores: Union['MatchData', 'MatchGroup']):
-        return json.dumps(scores.to_dict(), indent=2, default=lambda x: x.isoformat() if isinstance(x, datetime) else str(x))
+    def create_scoreboard(
+        cls,
+        scores: Union['MatchData', 'MatchGroup', TankScoreboardResult],
+        mode: 'ScoreboardMode' = ScoreboardMode.standard,
+    ):
+        if mode == ScoreboardMode.tank:
+            if isinstance(scores, TankScoreboardResult):
+                return json.dumps(scores.to_dict(), indent=2)
+            raise ValueError("Expected TankScoreboardResult for tank mode")
+        return json.dumps(
+            scores.to_dict(),
+            indent=2,
+            default=lambda x: x.isoformat() if isinstance(x, datetime) else str(x),
+        )
 
 
 

@@ -216,6 +216,32 @@ port `5432`, and injects the matching environment variables into the bot contain
 in a `session_logs` table inside the `postgres-data` volume so that containers can be
 recreated without losing historical records.
 
+#### Tank crew scoreboard
+
+Need a tank-focused scoring sheet? Run `/export scoreboard` and toggle the `tank` option
+to generate a file that applies the following point system per faction:
+
+- +10 for each detected tank kill (vehicle weapons or tanker-on-tanker eliminations)
+- +10 (once) when a crew hits 3+ kills in a single life (“Veteran”)
+- +20 (once) when a crew hits 5+ kills in a single life (“Ace”)
+- +1 point per minute holding the mid capture point
+- +1.5 points per minute holding the enemy’s 4th objective
+
+The export view still supports text, CSV, and JSON output formats. The detection logic is
+best-effort based on RCON logs, so keep an eye on edge cases such as unusual weapon names.
+
+Prefer an on-demand Discord response? Use `/tank_score view` to render the same tank
+scoreboard for an active session (optionally resetting the window with
+`/tank_score reset`). Gate access per-session via `/tank_score enable`, which also drops a
+persistent scoreboard message in the channel, auto-refreshing every five minutes and
+posting a final snapshot as soon as the match ends. All commands respect the
+environment-driven tuning knobs:
+
+- `TANK_POINTS_TANK_KILL` (default 10)
+- `TANK_POINTS_VETERAN_THRESHOLD` / `TANK_POINTS_VETERAN_BONUS`
+- `TANK_POINTS_ACE_THRESHOLD` / `TANK_POINTS_ACE_BONUS`
+- `TANK_POINTS_MID_PPM` and `TANK_POINTS_FOURTH_PPM`
+
 This container will run in the background, and restart automatically after a system reboot. In case you ever want to stop it, you can use the `docker-compose down` command.
 
 ### Discord permissions

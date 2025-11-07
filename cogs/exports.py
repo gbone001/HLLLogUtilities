@@ -13,7 +13,7 @@ from cogs.sessions import autocomplete_sessions
 from cogs.credentials import SECURITY_URL
 from cogs.apikeys import HSSApiKeysModal
 from discord_utils import CallableButton, CallableSelect, View, CustomException, get_error_embed, get_success_embed
-from lib.converters import ExportFormats, Converter
+from lib.converters import ExportFormats, Converter, ScoreboardMode
 from lib.hss.api_key import api_keys_in_guild_ttl, HSSApiKey, HSSTeam
 from lib.rcon.models import EventTypes
 from lib.flags import EventFlags
@@ -21,6 +21,7 @@ from lib.mappings import get_map_and_mode, parse_layer
 from lib.scores import MatchGroup
 from lib.session import HLLCaptureSession, SESSIONS
 from lib.storage import LogLine
+from lib.tank_scoreboard import build_tank_scoreboard
 
 class ExportRange(BaseModel):
     start_time: Optional[datetime] = None
@@ -121,11 +122,12 @@ class ExportView(View):
         ("Modifiers", "🧮", EventFlags.modifiers()),
     )
 
-    def __init__(self, interaction: Interaction, session: HLLCaptureSession, as_scoreboard: bool = False):
+    def __init__(self, interaction: Interaction, session: HLLCaptureSession, as_scoreboard: bool = False, scoreboard_mode: ScoreboardMode = ScoreboardMode.standard):
         super().__init__(timeout=300)
         self.interaction = interaction
         self.session = session
         self.as_scoreboard = bool(as_scoreboard)
+        self.scoreboard_mode = scoreboard_mode
         
         self.logs = session.get_logs()
         if not self.logs:
@@ -224,7 +226,10 @@ class ExportView(View):
             filter=self.flags
         )
 
-        content = f"{'Scoreboard' if self.as_scoreboard else 'Logs'} for **{esc_md(self.session.name)}**"
+        label = "Logs"
+        if self.as_scoreboard:
+            label = "Tank Scoreboard" if self.scoreboard_mode == ScoreboardMode.tank else "Scoreboard"
+        content = f"{label} for **{esc_md(self.session.name)}**"
         if self.range.map_name:
             content += f" ({self.range.map_name})"
         if self.flags != self.flags.all():
@@ -236,12 +241,8 @@ class ExportView(View):
             converter: Converter = self.format.value
 
             if self.as_scoreboard:
-                if self._range_index is None:
-                    match_data = self.scores
-                else:
-                    match_data = self.scores.matches[self._range_index]
-
-                fp = StringIO(converter.create_scoreboard(match_data))
+                match_data = self._get_scoreboard_payload()
+                fp = StringIO(converter.create_scoreboard(match_data, mode=self.scoreboard_mode))
                 file = discord.File(fp, filename=self.session.name + '.' + converter.ext())
 
             else:
@@ -864,14 +865,16 @@ class exports(commands.Cog):
         
     @ExportGroup.command(name="scoreboard", description="Export a scoreboard from a session")
     @app_commands.describe(
-        session="A log capture session"
+        session="A log capture session",
+        tank="Use tank crew scoring instead of the default scoreboard",
     )
     @app_commands.autocomplete(
         session=autocomplete_sessions
     )
-    async def export_scoreboard(self, interaction: Interaction, session: int):
+    async def export_scoreboard(self, interaction: Interaction, session: int, tank: bool = False):
         session: HLLCaptureSession = SESSIONS[session]
-        view = ExportView(interaction, session, as_scoreboard=True)
+        mode = ScoreboardMode.tank if tank else ScoreboardMode.standard
+        view = ExportView(interaction, session, as_scoreboard=True, scoreboard_mode=mode)
         await view.send()
         
     @ExportGroup.command(name="to_helo", description="Export a session to HeLO")
@@ -888,3 +891,9 @@ class exports(commands.Cog):
         
 async def setup(bot: commands.Bot):
     await bot.add_cog(exports(bot))
+    def _get_scoreboard_payload(self):
+        if self.scoreboard_mode == ScoreboardMode.tank:
+            return build_tank_scoreboard(self.logs)
+        if self._range_index is None:
+            return self.scores
+        return self.scores.matches[self._range_index]
