@@ -4,6 +4,7 @@ import sqlite3
 from typing import Sequence
 
 from lib.logs import LogLine
+from lib.postgres_storage import mirror_session_logs
 
 DB_VERSION = 7
 HLU_VERSION = "v2.2.12"
@@ -203,12 +204,12 @@ elif db_version < DB_VERSION:
                      'player2_role', 'weapon', 'old', 'new', 'team_name', 'squad_name', 'message']
             )
 
-    cursor.execute('UPDATE "db_version" SET "format_version" = ?', (DB_VERSION,))
-    database.commit()
-    logging.info('Migrated database to format version %s!', DB_VERSION)
+cursor.execute('UPDATE "db_version" SET "format_version" = ?', (DB_VERSION,))
+database.commit()
+logging.info('Migrated database to format version %s!', DB_VERSION)
 
 
-def insert_many_logs(sess_id: int, logs: Sequence['LogLine'], sort: bool = True):
+def insert_many_logs(sess_id: int, logs: Sequence['LogLine'], sort: bool = True, guild_id: int | None = None):
     sess_name = f"session{int(sess_id)}"
     table = Table(sess_name)
 
@@ -222,6 +223,7 @@ def insert_many_logs(sess_id: int, logs: Sequence['LogLine'], sort: bool = True)
     cursor.execute(str(insert_query))
     
     database.commit()
+    mirror_session_logs(session_id=sess_id, guild_id=guild_id, logs=logs)
 
 def delete_logs(sess_id: int):
     sess_name = f"session{int(sess_id)}"

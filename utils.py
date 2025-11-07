@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 import asyncio
+import os
 from pathlib import Path
 import re
 from typing import Coroutine
@@ -76,17 +77,35 @@ class SingletonMeta(type):
 from configparser import ConfigParser, MissingSectionHeaderError
 
 CONFIG = {}
+CONFIG_PATH = Path(os.getenv("HLU_CONFIG", "config.ini"))
+EXAMPLE_CONFIG_PATH = Path("config.example.ini")
+
+
+def _load_config_file(parser: ConfigParser, path: Path) -> None:
+    try:
+        parser.read(path, encoding='utf-8')
+    except MissingSectionHeaderError:
+        parser.read(path, encoding='utf-8-sig')
+
+
 def get_config() -> ConfigParser:
     global CONFIG
-    if not CONFIG:
-        parser = ConfigParser()
-        try:
-            parser.read('config.ini', encoding='utf-8')
-        except MissingSectionHeaderError:
-            # Most likely a BOM was added. This can happen automatically when
-            # saving the file with Notepad. Let's open with UTF-8-BOM instead.
-            parser.read('config.ini', encoding='utf-8-sig')
-        CONFIG = parser
+    if CONFIG:
+        return CONFIG
+
+    if not CONFIG_PATH.exists():
+        raise FileNotFoundError(
+            f"Missing config file at '{CONFIG_PATH}'. "
+            "Copy config.example.ini to config.ini and fill in your secrets, "
+            "or set the HLU_CONFIG environment variable to point at your configuration."
+        )
+
+    parser = ConfigParser()
+    if EXAMPLE_CONFIG_PATH.exists():
+        _load_config_file(parser, EXAMPLE_CONFIG_PATH)
+    _load_config_file(parser, CONFIG_PATH)
+
+    CONFIG = parser
     return CONFIG
     
 

@@ -339,7 +339,7 @@ class HLLCaptureSession:
     def push_to_db(self):
         self.logger.info('Pushing %s logs to the DB', len(self._logs))
         if self._logs:
-            insert_many_logs(sess_id=self.id, logs=self._logs)
+            insert_many_logs(sess_id=self.id, logs=self._logs, guild_id=self.guild_id)
         self._logs = list()
 
     def get_logs(

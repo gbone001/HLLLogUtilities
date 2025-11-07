@@ -161,7 +161,9 @@ That's all the files installed! Now let's create our bot account over on Discord
 We've just prepared our application. Now we need to share it with our code.
 
 11. Click on the "Reset Token" button and copy your token.
-12. Open the "config.ini" file and fill in the token you've just copied. Make sure there's no trailing spaces.
+12. Copy `config.example.ini` to `config.ini` and fill in the token (plus any other secrets such as Steam API keys).  
+    > Keep `config.ini` out of version control—it's already listed in `.gitignore`.  
+    > Advanced: set the `HLU_CONFIG` environment variable if you want to load the file from a different location.
 
 Almost done now! From here on out though, how to proceed depends on how you've decided to run the bot.
 
@@ -193,10 +195,26 @@ This terminal will need to stay open for the bot to work. Closing down this term
 ```shell
 sqlite3 sessions.db "VACUUM;"
 ```
-14. Start the container!
+14. Copy `.env.example` to `.env` and update the PostgreSQL credentials you want Docker to use.  
+    This file stays on disk only and is never committed.
+15. Start the container!
 ```shell
 docker-compose up -d
 ```
+
+#### Capturing logs in PostgreSQL
+
+Every processed HLL log line can now be mirrored into a PostgreSQL database.  
+Provide a connection string by setting `POSTGRES_DSN`/`DATABASE_URL`, or supply
+`POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_DB`, `POSTGRES_USER`, and `POSTGRES_PASSWORD`
+environment variables (the Docker stack loads them from `.env`) before starting the bot.
+Set `POSTGRES_ENABLED=0` to skip replication.
+
+The bundled `docker-compose.yml` already provisions a `postgres` service, exposes it on
+port `5432`, and injects the matching environment variables into the bot container. Update
+`.env` with strong credentials before deploying anywhere public. The database stores logs
+in a `session_logs` table inside the `postgres-data` volume so that containers can be
+recreated without losing historical records.
 
 This container will run in the background, and restart automatically after a system reboot. In case you ever want to stop it, you can use the `docker-compose down` command.
 
