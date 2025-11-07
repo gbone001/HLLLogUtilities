@@ -1,0 +1,33 @@
+# geofences/config.mid.yml (PHASE B: Mid-only)
+rcon:
+  address: "${RCON_ADDRESS:-127.0.0.1:28500}"
+  password: "${RCON_V2_PASSWORD:-changeme}"
+
+policy:
+  grace_seconds: 10
+  message_cooldown: 10
+
+maps:
+  - name: "StMarieDuMont_Warfare_Day"
+    teams:
+      allies:
+        fences:
+          - name: "MID_LANE_ONLY"
+            polygon: [[E3],[F3],[F8],[E8]]
+            action: "punish"
+      axis:
+        fences:
+          - name: "MID_LANE_ONLY"
+            polygon: [[E3],[F3],[F8],[E8]]
+            action: "punish"
+    global_no_go:
+      - name: "HQ_BUBBLES"
+        per_team:
+          allies: { circle: { center: [100,100], radius: 75 } }
+          axis:   { circle: { center: [900,900], radius: 75 } }
+        action: "punish"
+      - name: "ENEMY_LAST_3_GRIDS"
+        per_team:
+          allies: { polygon: [[I1],[I10],[K10],[K1]] }
+          axis:   { polygon: [[A1],[A10],[C10],[C1]] }
+        action: "punish"

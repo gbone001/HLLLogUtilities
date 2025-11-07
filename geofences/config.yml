@@ -1,0 +1,44 @@
+# geofences/config.yml (PHASE A: Pre-combat hold)
+# Replace polygons with correct coordinates for your layers.
+rcon:
+  address: "${RCON_ADDRESS:-127.0.0.1:28500}"
+  password: "${RCON_V2_PASSWORD:-changeme}"
+
+policy:
+  grace_seconds: 10
+  message_cooldown: 10
+
+maps:
+  - name: "StMarieDuMont_Warfare_Day"
+    teams:
+      allies:
+        fences:
+          - name: "ALLIES_HOLD_ZONE"
+            polygon:
+              - [A1]
+              - [C1]
+              - [C5]
+              - [A5]
+            action: "punish"
+      axis:
+        fences:
+          - name: "AXIS_HOLD_ZONE"
+            polygon:
+              - [H1]
+              - [J1]
+              - [J5]
+              - [H5]
+            action: "punish"
+
+    global_no_go:
+      - name: "ENEMY_LAST_3_GRIDS"
+        per_team:
+          allies: { polygon: [[I1],[I10],[K10],[K1]] }
+          axis:   { polygon: [[A1],[A10],[C10],[C1]] }
+        action: "punish"
+
+      - name: "HQ_BUBBLES"
+        per_team:
+          allies: { circle: { center: [100,100], radius: 75 } }
+          axis:   { circle: { center: [900,900], radius: 75 } }
+        action: "punish"

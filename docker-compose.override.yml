@@ -1,0 +1,12 @@
+# docker-compose.override.yml
+version: "3.8"
+services:
+  hll-geofences:
+    image: ghcr.io/floriansw/hll-geofences:main
+    environment:
+      TZ: "Australia/Sydney"
+      RCON_ADDRESS: "${RCON_ADDRESS:-127.0.0.1:28500}"
+      RCON_PASSWORD: "${RCON_V2_PASSWORD:-changeme}"
+    volumes:
+      - ./geofences/config.yml:/app/config.yml:ro
+    restart: unless-stopped
