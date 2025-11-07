@@ -244,6 +244,22 @@ environment-driven tuning knobs:
 
 This container will run in the background, and restart automatically after a system reboot. In case you ever want to stop it, you can use the `docker-compose down` command.
 
+### Deploy to Railway
+
+Railway can build this repo straight from the Dockerfile. A minimal flow:
+
+1. Install the [Railway CLI](https://docs.railway.app/quick-start).
+2. From the repo root run `railway init` (or `railway link` to an existing project).
+3. Provision a Postgres database with `railway add` → choose “PostgreSQL”. Railway exposes the
+   connection string as `DATABASE_URL`, which the bot already understands.
+4. Upload your bot configuration:  
+   `railway variables set HLU_CONFIG_CONTENT="$(cat config.ini)"`  
+   (You can keep using a local `config.ini`; the env var is only read in the cloud.)
+5. Set any additional secrets (`POSTGRES_ENABLED=1`, Discord token, etc.) with `railway variables set`.
+6. Deploy with `railway up` or enable automatic GitHub builds.
+
+The provided `railway.json` tells Railway to build via Docker and restart the service on failure.
+
 ### Discord permissions
 
 The bot can, by default, not be used by any other user, except ones with the "Manage Server" permission.

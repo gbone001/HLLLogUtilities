@@ -79,6 +79,7 @@ from configparser import ConfigParser, MissingSectionHeaderError
 CONFIG = {}
 CONFIG_PATH = Path(os.getenv("HLU_CONFIG", "config.ini"))
 EXAMPLE_CONFIG_PATH = Path("config.example.ini")
+CONFIG_CONTENT = os.getenv("HLU_CONFIG_CONTENT")
 
 
 def _load_config_file(parser: ConfigParser, path: Path) -> None:
@@ -93,17 +94,20 @@ def get_config() -> ConfigParser:
     if CONFIG:
         return CONFIG
 
-    if not CONFIG_PATH.exists():
-        raise FileNotFoundError(
-            f"Missing config file at '{CONFIG_PATH}'. "
-            "Copy config.example.ini to config.ini and fill in your secrets, "
-            "or set the HLU_CONFIG environment variable to point at your configuration."
-        )
-
     parser = ConfigParser()
     if EXAMPLE_CONFIG_PATH.exists():
         _load_config_file(parser, EXAMPLE_CONFIG_PATH)
-    _load_config_file(parser, CONFIG_PATH)
+
+    if CONFIG_PATH.exists():
+        _load_config_file(parser, CONFIG_PATH)
+    elif CONFIG_CONTENT:
+        parser.read_string(CONFIG_CONTENT)
+    else:
+        raise FileNotFoundError(
+            f"Missing config file at '{CONFIG_PATH}'. "
+            "Copy config.example.ini to config.ini and fill in your secrets, "
+            "set HLU_CONFIG to another path, or provide HLU_CONFIG_CONTENT with INI data."
+        )
 
     CONFIG = parser
     return CONFIG
