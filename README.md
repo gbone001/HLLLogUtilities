@@ -190,6 +190,23 @@ python -m scripts.sqlite_to_postgres --sqlite-path sessions.db `
 
 Run the script again without `--dry-run` during maintenance windows to perform the actual copy. After the run completes, switch `[Database].Mode` to `dual` and restart the bot so every new session is mirrored to PostgreSQL.
 
+### Local Postgres test DSN
+
+The storage test suite (`tests/storage/test_postgres.py`) expects a live PostgreSQL instance. A ready-made Docker container named `hllu-pg` is already configured to expose port `6543` locally with default credentials (`postgres` / `postgres`).
+
+1. Ensure the container is running (`docker ps` should show `hllu-pg` based on `postgres:16`).
+2. Point pytest at it by setting `POSTGRES_TEST_DSN=postgresql://postgres:postgres@127.0.0.1:6543/postgres`. Add the line below to your `.env` so VS Code and `python -m pytest` pick it up automatically:
+
+```
+POSTGRES_TEST_DSN=postgresql://postgres:postgres@127.0.0.1:6543/postgres
+```
+
+3. Run `python -m pytest` (or `python -m pytest tests/storage/test_postgres.py`) to execute the dual-write integration tests against that container.
+
+Feel free to override the DSN if you already have another PostgreSQL instance; the URL just needs a database with privileges to drop/recreate the `public` schema.
+
+> Our GitHub Actions workflow (`.github/workflows/tests.yml`) spins up a `postgres:16` service and exports the same `POSTGRES_TEST_DSN`, so the storage tests run automatically on every push/PR.
+
 Almost done now! From here on out though, how to proceed depends on how you've decided to run the bot.
 
 ### If you want to **run natively from source**...

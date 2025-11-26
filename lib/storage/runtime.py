@@ -337,4 +337,3 @@ def delete_api_key(api_key_id: int) -> None:
             await conn.execute("DELETE FROM hss_api_keys WHERE id = $1", api_key_id)
 
     _schedule(_run(), f"pg-api-key-delete-{api_key_id}")
-```}
