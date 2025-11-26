@@ -29,6 +29,7 @@ We will consolidate storage into PostgreSQL with the following schema, powered b
 
 ### Access Layer & Tooling
 - **Access layer**: SQLAlchemy Core + asyncpg engine. Core keeps query definitions close to today’s raw SQL yet yields dialect portability and compile-time schema definitions. asyncpg offers excellent async performance and COPY support.
+- **Runtime versioning**: CI and self-hosted environments should stick to Python 3.11/3.12 for now so asyncpg wheels install cleanly; 3.13+ currently requires compiling the driver.
 - **Migrations**: Adopt Alembic (`alembic/` directory) with async revision scripts. We will:
   1. Initialize Alembic with `alembic init alembic`.
   2. Capture the PostgreSQL schema above as the baseline migration (`alembic/versions/0001_initial.py`).
@@ -38,6 +39,8 @@ We will consolidate storage into PostgreSQL with the following schema, powered b
 Add a `[Database]` section to `config.ini`:
 ```
 [Database]
+; Storage mode: sqlite (default), dual (mirror), or postgres (Postgres-only). Override via HLL_STORAGE_MODE env var.
+Mode=sqlite
 ; SQLAlchemy-style URL, e.g. postgresql+asyncpg://user:pass@host:5432/hll_logs
 Url=
 ; Minimum connections to keep in the async pool
@@ -68,3 +71,51 @@ Bots running without this section default to SQLite (compat mode) until we cut o
 2. Wire runtime objects to the new pool and phase out SQLite codepaths.
 3. Provide migration scripts to backfill existing sessions into PostgreSQL.
 4. Update developer docs (README/CONTRIBUTING) with setup steps and Alembic commands.
+
+## Migration & Backfill
+
+### 5.1 Offline Migration Script
+We will add `scripts/sqlite_to_postgres.py`, a one-shot utility that:
+- Opens the legacy `sessions.db` via SQLAlchemy (synchronous engine) and streams rows in primary-key order.
+- Connects to PostgreSQL using the asyncpg DSN from `[Database].Url` (script uses `asyncio.run` to share COPY helpers from `lib/storage/postgres.py`).
+- Recreates sessions, modifiers, and credentials first (respecting existing IDs), then bulk loads each `session{id}` log table into its target partition using COPY with 1k-row batches to keep memory bounded.
+
+Usage:
+```pwsh
+python -m scripts.sqlite_to_postgres \
+  --sqlite-path sessions.db \
+  --postgres-dsn postgresql://user:pass@host:5432/hll_logs \
+  --start-session-id 0 --end-session-id 999999 \
+  --batch-size 1000 --dry-run
+```
+
+Operational steps:
+1. Quiesce the bot (or run during scheduled downtime) so SQLite no longer mutates.
+2. Take backups (see §5.3) and record the latest `session_id` for verification.
+3. Run the script with `--dry-run` to validate connectivity, then without to perform the copy.
+4. Compare row counts per table (script reports checksum + counts) before switching to dual-write mode.
+
+### 5.2 Dual-write & Feature Flag Rollout
+Introduce a `Mode` flag inside `[Database]` (or env `HLL_STORAGE_MODE`) with values:
+- `sqlite` (default legacy path)
+- `dual` (write-through to both stores; reads still prefer SQLite)
+- `postgres` (PostgreSQL single-writer, SQLite disabled)
+
+**Operational guardrail**: before switching to `dual` or `postgres`, operators must set `HLL_DB_URL` (or `[Database].Url`) so the bot can build a PostgreSQL pool. Without a DSN the runtime will warn and fall back to `sqlite` to avoid partially-enabled dual writes.
+
+Implementation plan:
+1. Repository factory returns both `SQLiteStorage` and `PostgresStorage` instances.
+2. When `Mode=dual`, session mutations (create/update/delete, log inserts) call both backends; discrepancies raise alerts but continue running to avoid downtime.
+3. Reads during the dual phase remain on SQLite until parity checks confirm correctness, after which `Mode=postgres` flips the bot fully to PostgreSQL.
+4. Feature flag can be toggled per environment via config reload or owner-only Discord command to ease staged rollout (dev → staging → prod).
+
+### 5.3 Rollback & Backups
+Always snapshot both databases before switching modes:
+- SQLite: `sqlite3 sessions.db ".backup backups/sessions-$(Get-Date -Format yyyyMMddHHmm).db"`
+- PostgreSQL: `pg_dump "$env:HLL_DB_URL" --file backups/pg_dump_$(Get-Date -Format yyyyMMddHHmm).sql`
+
+Rollback procedure:
+1. Set `[Database].Mode=sqlite` (or clear `HLL_DB_URL`) and restart the bot to return to the legacy path.
+2. Restore SQLite from the `.backup` file if needed (replace `sessions.db`).
+3. Drop/recreate the PostgreSQL database or `alembic downgrade base` before re-running the migration script.
+4. Re-run the copy script once the issue is resolved, verify counts, then re-enable `Mode=dual`.

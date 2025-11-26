@@ -126,7 +126,7 @@ If you choose to host your own instance of the bot, you can run it natively from
 ### **Prerequisites (Native)**
 - A machine to host on, such as a VPS, dedicated server or your own PC
 - [Git](https://git-scm.com/downloads)
-- [Python](https://www.python.org/downloads) 3.11 or above
+- [Python](https://www.python.org/downloads) 3.11 or 3.12 (asyncpg does not ship wheels for 3.13+ yet)
 
 ### **Prerequisites (Docker)**
 - A machine to host on, such as a VPS, dedicated server or your own PC
@@ -163,16 +163,43 @@ We've just prepared our application. Now we need to share it with our code.
 11. Click on the "Reset Token" button and copy your token.
 12. Open the "config.ini" file and fill in the token you've just copied. Make sure there's no trailing spaces.
 
+### Database migration & dual-write
+
+Add a `[Database]` section to `config.ini` to opt into PostgreSQL and dual-write mode:
+
+```
+[Database]
+Mode=sqlite        ; sqlite, dual, postgres (dual mirrors writes to PostgreSQL)
+Url=postgresql://postgres:postgres@localhost:5432/hll_logs
+PoolMinSize=2
+PoolMaxSize=10
+StatementTimeoutSeconds=5
+```
+
+- `Mode=dual` keeps SQLite as the primary store while streaming the same writes to PostgreSQL for validation.
+- Set `Mode=sqlite` (default) to disable dual-write. The future `postgres` mode will be enabled once runtime reads move over.
+- You can override `Url` and `Mode` via `HLL_DB_URL` / `HLL_STORAGE_MODE` environment variables when deploying.
+
+Once a PostgreSQL DSN is available, backfill historical data with the migration utility:
+
+```pwsh
+python -m scripts.sqlite_to_postgres --sqlite-path sessions.db `
+    --postgres-dsn postgresql://postgres:postgres@localhost:5432/hll_logs `
+    --batch-size 1000 --dry-run
+```
+
+Run the script again without `--dry-run` during maintenance windows to perform the actual copy. After the run completes, switch `[Database].Mode` to `dual` and restart the bot so every new session is mirrored to PostgreSQL.
+
 Almost done now! From here on out though, how to proceed depends on how you've decided to run the bot.
 
 ### If you want to **run natively from source**...
 
-13. Install all needed Python libraries.
+13. Install all needed Python libraries (run this inside a Python 3.11 or 3.12 virtualenv).
 ```shell
 pip3 install -r requirements.txt
 ```
 
-> **NOTE:** Windows users may get an error saying they need to install Visual C++ 2014. To do this, follow the below steps:
+> **NOTE:** Stick to Python 3.11/3.12 for now—`asyncpg` only publishes wheels for those versions, so Python 3.13+ will require a full C++ toolchain. Windows users may also get an error saying they need to install Visual C++ 2014. To do this, follow the below steps:
 > 1. Download and run [Visual Studio Build Tools](https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio-2022)
 > 2. Under "Workloads", select "Desktop development with C++"
 > 3. Under "Invidivual components", select most relevant versions of both "C++ x64/x86 build tools" and "Windows SDK"
