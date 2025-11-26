@@ -1,4 +1,9 @@
 from lib.storage import cursor, database
+from lib.storage.runtime import (
+    CredentialReplica,
+    delete_credentials as delete_pg_credentials,
+    replicate_credentials,
+)
 from lib.exceptions import NotFound, TemporaryCredentialsError, CredentialsAlreadyCreatedError
 from lib.modifiers import ModifierFlags
 from lib.autosession import AutoSessionManager
@@ -31,6 +36,20 @@ class Credentials:
             
             assert self.id is not None
             CREDENTIALS[self.id] = self
+
+        def _as_replica(self) -> CredentialReplica:
+            if self.id is None:
+                raise ValueError("Credential not persisted")
+            return CredentialReplica(
+                id=int(self.id),
+                guild_id=int(self.guild_id),
+                name=self.name,
+                address=self.address,
+                port=int(self.port),
+                password=self.password,
+                default_modifiers=self.default_modifiers.value,
+                autosession_enabled=self.autosession_enabled,
+            )
 
     @classmethod
     def get(cls, id: int):
@@ -73,7 +92,7 @@ class Credentials:
             default_modifiers = ModifierFlags()
 
         id_ = cls._create_in_db(guild_id, name, address, port, password, default_modifiers)
-        return cls(
+        obj = cls(
             id=id_,
             guild_id=guild_id,
             name=name,
@@ -82,6 +101,8 @@ class Credentials:
             password=password,
             default_modifiers=default_modifiers,
         )
+        replicate_credentials(obj._as_replica())
+        return obj
 
     @classmethod
     def create_temporary(cls, guild_id: int, name: str, address: str, port: int, password: str, default_modifiers: ModifierFlags | None = None):
@@ -156,11 +177,13 @@ class Credentials:
             self.autosession = AutoSessionManager(self, False)
         assert self.id is not None
         CREDENTIALS[self.id] = self
+        replicate_credentials(self._as_replica())
 
     def save(self):
         cursor.execute('UPDATE credentials SET name = ?, address = ?, port = ?, password = ?, default_modifiers = ?, autosession_enabled = ? WHERE ROWID = ?',
             (self.name, self.address, self.port, self.password, self.default_modifiers.value, self.autosession_enabled, self.id))
         database.commit()
+        replicate_credentials(self._as_replica())
     
     def delete(self):
         if self.temporary:
@@ -171,6 +194,8 @@ class Credentials:
         
         cursor.execute('DELETE FROM credentials WHERE ROWID = ?', (self.id,))
         database.commit()
+        assert self.id is not None
+        delete_pg_credentials(int(self.id))
         
         assert self.id is not None
         del CREDENTIALS[self.id]

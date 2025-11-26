@@ -5,3 +5,7 @@ cachetools
 python-dateutil
 sortedcontainers
 hllrcon==0.3.*
+asyncpg
+SQLAlchemy>=2.0
+pytest
+pytest-asyncio

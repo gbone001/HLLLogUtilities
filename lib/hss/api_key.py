@@ -3,6 +3,11 @@ import pydantic
 from typing import Union, Optional
 
 from lib.storage import cursor, database
+from lib.storage.runtime import (
+    ApiKeyReplica,
+    delete_api_key as delete_pg_api_key,
+    replicate_api_key,
+)
 from lib.exceptions import NotFound
 from utils import ttl_cache
 
@@ -12,6 +17,16 @@ class HSSApiKey:
         self.guild_id = guild_id
         self.team = team
         self.key = key
+
+    def _as_replica(self) -> ApiKeyReplica:
+        if self.id is None:
+            raise ValueError('API key not persisted')
+        return ApiKeyReplica(
+            id=int(self.id),
+            guild_id=int(self.guild_id),
+            tag=self.team.tag,
+            key=self.key,
+        )
 
     @classmethod
     def load_from_db(cls, id: int):
@@ -37,12 +52,14 @@ class HSSApiKey:
     @classmethod
     def create_in_db(cls, guild_id: int, team: 'HSSTeam', key: str):
         id_ = cls._create_in_db(guild_id, team.tag, key)
-        return cls(
+        obj = cls(
             id=id_,
             guild_id=guild_id,
             team=team,
             key=key,
         )
+        replicate_api_key(obj._as_replica())
+        return obj
 
     @classmethod
     def create_temporary(cls, guild_id: int, team: 'HSSTeam', key: str):
@@ -89,17 +106,21 @@ class HSSApiKey:
             tag=self.team.tag,
             key=self.key,
         )
+        replicate_api_key(self._as_replica())
 
     def save(self):
         cursor.execute('UPDATE hss_api_keys SET tag = ?, key = ? WHERE ROWID = ?',
                        (self.team.tag, self.key, self.id))
         database.commit()
+        replicate_api_key(self._as_replica())
 
     def delete(self):
         if self.temporary:
             raise TypeError('This API key is already unsaved')
         cursor.execute('DELETE FROM hss_api_keys WHERE ROWID = ?', (self.id,))
         database.commit()
+        assert self.id is not None
+        delete_pg_api_key(int(self.id))
         self.id = None
 
 class HSSTeam(pydantic.BaseModel):

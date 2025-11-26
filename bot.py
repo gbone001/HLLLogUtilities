@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 
 from utils import get_config, ttl_cache
+from lib.storage import runtime as storage_runtime
 from lib.hss.api import HSSApi
 
 HSS_API_BASE = get_config().get('HSS', 'ApiBaseUrl')
@@ -43,12 +44,19 @@ class Bot(commands.Bot):
         self.hss = HSSApi(HSS_API_BASE)
     
     async def setup_hook(self) -> None:
+        await storage_runtime.startup()
         await load_all_cogs()
         await sync_commands()
     
     @ttl_cache(size=60, seconds=300)
     async def _hss_teams(self):
         return await self.hss.teams()
+
+    async def close(self) -> None:
+        try:
+            await storage_runtime.shutdown()
+        finally:
+            await super().close()
 
 bot = Bot(
     intents=discord.Intents.default(),

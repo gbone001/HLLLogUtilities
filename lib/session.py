@@ -12,6 +12,12 @@ from lib.modifiers import ModifierFlags, Modifier, INTERNAL_MODIFIERS
 from lib.rcon import HLLRcon
 from lib.rcon.models import ActivationEvent, DeactivationEvent, EventModel, IterationEvent, PrivateEventModel, Snapshot
 from lib.storage import LogLine, database, cursor, insert_many_logs, delete_logs
+from lib.storage.runtime import (
+    SessionReplica,
+    replicate_session,
+    replicate_session_logs,
+    replicate_session_mark_deleted,
+)
 from utils import get_config, schedule_coro, get_logger
 
 SECONDS_BETWEEN_ITERATIONS = get_config().getint('Session', 'SecondsBetweenIterations')
@@ -75,6 +81,18 @@ class HLLCaptureSession:
         self.sent_helo_prompt_indices = list()
 
         SESSIONS[self.id] = self
+
+    def _as_replica(self) -> SessionReplica:
+        return SessionReplica(
+            session_id=int(self.id),
+            guild_id=int(self.guild_id),
+            name=self.name,
+            start_time=self.start_time,
+            end_time=self.end_time if not self.is_auto_session else None,
+            is_auto=self.is_auto_session,
+            credentials_id=self.credentials.id if self.credentials else None,
+            modifier_flags=self.modifier_flags.value,
+        )
         
     @classmethod
     def load_from_db(cls, id: int):
@@ -133,6 +151,7 @@ class HLLCaptureSession:
             modifiers=modifiers
         )
         self.logger.info("Created new session: %s", self)
+        replicate_session(self._as_replica())
         return self
 
     @property
@@ -161,6 +180,7 @@ class HLLCaptureSession:
             (self.name, self.start_time, self.end_time if not self.is_auto_session else None, self.credentials.id if self.credentials else None,
              self.modifier_flags.value, self.id))
         database.commit()
+        replicate_session(self._as_replica())
 
     def active_in(self) -> Union[timedelta, bool]:
         """Returns how long until the session should start. Otherwise
@@ -339,6 +359,7 @@ class HLLCaptureSession:
     def push_to_db(self):
         self.logger.info('Pushing %s logs to the DB', len(self._logs))
         if self._logs:
+            replicate_session_logs(self.id, self._logs)
             insert_many_logs(sess_id=self.id, logs=self._logs)
         self._logs = list()
 
@@ -381,6 +402,7 @@ class HLLCaptureSession:
         update_query = table.update().set(table.deleted, True).where(table.ROWID == self.id)
         cursor.execute(str(update_query))
         database.commit()
+        replicate_session_mark_deleted(self.id, datetime.now(tz=timezone.utc))
         
         del SESSIONS[self.id]
 
