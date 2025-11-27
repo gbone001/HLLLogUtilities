@@ -13,7 +13,17 @@ from lib.credentials import Credentials, CREDENTIALS
 from lib.storage import cursor
 from lib.modifiers import ModifierFlags
 from cogs.credentials import RCONCredentialsModal, SessionModifierView, SECURITY_URL, MODIFIERS_URL, autocomplete_credentials
-from discord_utils import CallableButton, CustomException, get_success_embed, get_question_embed, only_once, View, ExpiredButtonError, get_command_mention
+from discord_utils import (
+    CallableButton,
+    CustomException,
+    EmbedBuilder,
+    ExpiredButtonError,
+    View,
+    get_command_mention,
+    get_question_embed,
+    get_success_embed,
+    only_once,
+)
 from utils import get_config
 
 MAX_SESSION_DURATION = timedelta(minutes=get_config().getint('Session', 'MaxDurationInMinutes'))
@@ -143,28 +153,29 @@ class SessionCreateView(View):
         else:
             server_name = "Unknown server ⚠️"
         
-        embed = discord.Embed(
-            title="Editing the session..." if self.do_edit else "Scheduling a new session...",
-            description="Please verify that all the information is correct.",
-            colour=self.embed_color
-        ).set_author(
-            name=server_name,
-            icon_url=icon_url
-        ).add_field(
-            name="From",
-            value=f"<t:{int(self.start_time.timestamp())}:f>\n:watch: <t:{int(self.start_time.timestamp())}:R>"
-        ).add_field(
-            name="To",
-            value=f"<t:{int(self.end_time.timestamp())}:f>\n:calling: {self.total_minutes} minutes later"
+        start_ts = int(self.start_time.timestamp())
+        end_ts = int(self.end_time.timestamp())
+        builder = (
+            EmbedBuilder(
+                title="Editing the session..." if self.do_edit else "Scheduling a new session...",
+                description="Please verify that all the information is correct.",
+                color=self.embed_color,
+            )
+            .set_author(name=server_name, icon_url=icon_url)
+            .add_inline_field(name="From", value=f"<t:{start_ts}:f>\n:watch: <t:{start_ts}:R>")
+            .add_inline_field(name="To", value=f"<t:{end_ts}:f>\n:calling: {self.total_minutes} minutes later")
         )
 
         if self.modifiers:
-            embed.add_field(name=f"Active Modifiers ({len(self.modifiers)})", value="\n".join([
-                f"{m.config.emoji} [**{m.config.name}**]({MODIFIERS_URL}#{m.config.name.lower().replace(' ', '-')}) - {m.config.description}"
-                for m in self.modifiers.get_modifier_types()
-            ]), inline=False)
+            builder.add_modifiers_field(
+                title=f"Active Modifiers ({len(self.modifiers)})",
+                modifiers=[
+                    f"{m.config.emoji} [**{m.config.name}**]({MODIFIERS_URL}#{m.config.name.lower().replace(' ', '-')}) - {m.config.description}"
+                    for m in self.modifiers.get_modifier_types()
+                ],
+            )
 
-        return embed
+        return builder.build()
 
     async def on_confirm(self, interaction: Interaction):
         if self.credentials is False:

@@ -15,7 +15,19 @@ from lib.credentials import Credentials, credentials_in_guild_tll
 from lib.exceptions import HLLAuthError, HLLConnectionError, HLLConnectionRefusedError
 from lib.autosession import MIN_PLAYERS_TO_START, MIN_PLAYERS_UNTIL_STOP, SECONDS_BETWEEN_ITERATIONS, MAX_DURATION_MINUTES
 from lib.modifiers import ModifierFlags
-from discord_utils import CallableButton, get_error_embed, get_success_embed, get_question_embed, handle_error, CustomException, View, Modal, only_once, ExpiredButtonError
+from discord_utils import (
+    CallableButton,
+    EmbedBuilder,
+    get_error_embed,
+    get_success_embed,
+    get_question_embed,
+    handle_error,
+    CustomException,
+    View,
+    Modal,
+    only_once,
+    ExpiredButtonError,
+)
 
 MIN_ALLOWED_PORT = 1025
 MAX_ALLOWED_PORT = 65536
@@ -166,78 +178,85 @@ class AutoSessionView(View):
         return self.autosession.enabled
 
     def get_embed(self):
-        if self.guild.icon is not None:
-            icon_url = self.guild.icon.url
-        else:
-            icon_url = None
-        
-        embed = discord.Embed(
-            description="⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯",
-        ).set_author(
-            name=str(self.credentials),
-            icon_url=icon_url
-        ).set_footer(
-            text=(
-                "⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
-                f"Automatically start sessions with AutoSession! As soon as {MIN_PLAYERS_TO_START}\n"
-                "or more players get online a new session will automatically be\n"
-                f"started, which automatically ends after {(MAX_DURATION_MINUTES+59) // 60} hours or when the\n"
-                f"server drops below {MIN_PLAYERS_UNTIL_STOP} players again."
-            )
+        icon_url = self.guild.icon.url if self.guild.icon else None
+        divider = "⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯"
+        footer_text = (
+            "⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
+            f"Automatically start sessions with AutoSession! As soon as {MIN_PLAYERS_TO_START}\n"
+            "or more players get online a new session will automatically be\n"
+            f"started, which automatically ends after {(MAX_DURATION_MINUTES+59) // 60} hours or when the\n"
+            f"server drops below {MIN_PLAYERS_UNTIL_STOP} players again."
         )
+
+        builder = (
+            EmbedBuilder(description=divider)
+            .set_author(name=str(self.credentials), icon_url=icon_url)
+            .set_footer(text=footer_text)
+        )
+        builder.set_color(discord.Colour(0))
 
         if self.credentials.autosession_enabled:
             session = self.autosession.get_active_session()
 
             if session:
                 ts = int(session.start_time.timestamp())
-                embed.title = "AutoSession is currently enabled."
-                embed.color = discord.Colour.from_rgb(52,205,43)
-                embed.add_field(name="Status", value="\🟢Enabled", inline=True)
-                embed.add_field(name="Currently recording...", value=f"<t:{ts}:t> (<t:{ts}:R>)", inline=True)
-            
+                builder.set_title("AutoSession is currently enabled.").set_color(discord.Colour.from_rgb(52,205,43))
+                builder.add_inline_field(name="Status", value="\🟢Enabled")
+                builder.add_inline_field(name="Currently recording...", value=f"<t:{ts}:t> (<t:{ts}:R>)")
+
             elif self.autosession.is_slowed:
                 ts = int(self.autosession.last_seen_time.timestamp())
-                embed.title = "AutoSession is having issues!"
-                embed.color = discord.Colour.from_rgb(235,49,64)
-                embed.add_field(name="Status", value="\🟠Problems", inline=True)
-                embed.add_field(name="Last successful update", value=f"<t:{ts}:t> (<t:{ts}:R>)", inline=True)
-                embed.add_field(name="Most recent error", value=self.autosession.last_error, inline=False)
-            
+                builder.set_title("AutoSession is having issues!").set_color(discord.Colour.from_rgb(235,49,64))
+                builder.add_inline_field(name="Status", value="\🟠Problems")
+                builder.add_inline_field(name="Last successful update", value=f"<t:{ts}:t> (<t:{ts}:R>)")
+                builder.add_field(name="Most recent error", value=self.autosession.last_error, inline=False)
+
             elif not self.autosession._cooldown:
                 ts = int(self.autosession.last_seen_time.timestamp())
-                embed.title = "AutoSession is currently enabled."
-                embed.color = discord.Colour.from_rgb(52,205,43)
-                embed.add_field(name="Status", value="\🟢Enabled", inline=True)
-                embed.add_field(name="Waiting for players...", value=f"{self.autosession.last_seen_playercount}/{MIN_PLAYERS_TO_START} players (<t:{ts}:R>)", inline=True)
-            
+                builder.set_title("AutoSession is currently enabled.").set_color(discord.Colour.from_rgb(52,205,43))
+                builder.add_inline_field(name="Status", value="\🟢Enabled")
+                builder.add_inline_field(
+                    name="Waiting for players...",
+                    value=f"{self.autosession.last_seen_playercount}/{MIN_PLAYERS_TO_START} players (<t:{ts}:R>)",
+                )
+
             elif self.autosession.last_seen_playercount >= MIN_PLAYERS_UNTIL_STOP:
                 ts = int(self.autosession.last_seen_time.timestamp())
-                embed.title = "AutoSession is currently enabled."
-                embed.color = discord.Colour.from_rgb(255,243,33)
-                embed.add_field(name="Status", value="\🟡Cooldown", inline=True)
-                embed.add_field(name="Waiting for players...", value=f"{self.autosession.last_seen_playercount}/{MIN_PLAYERS_UNTIL_STOP} players (<t:{ts}:R>)", inline=True)
-            
+                builder.set_title("AutoSession is currently enabled.").set_color(discord.Colour.from_rgb(255,243,33))
+                builder.add_inline_field(name="Status", value="\🟡Cooldown")
+                builder.add_inline_field(
+                    name="Waiting for players...",
+                    value=f"{self.autosession.last_seen_playercount}/{MIN_PLAYERS_UNTIL_STOP} players (<t:{ts}:R>)",
+                )
+
             else:
-                ts = int((self.autosession.last_seen_time + self.autosession._cooldown * timedelta(seconds=SECONDS_BETWEEN_ITERATIONS)).timestamp())
-                embed.title = "AutoSession is currently enabled."
-                embed.color = discord.Colour.from_rgb(255,243,33)
-                embed.add_field(name="Status", value="\🟡Cooldown", inline=True)
-                embed.add_field(name="Available soon...", value=f"<t:{ts}:t> (<t:{ts}:R>)", inline=True)
+                ts = int((
+                    self.autosession.last_seen_time
+                    + self.autosession._cooldown * timedelta(seconds=SECONDS_BETWEEN_ITERATIONS)
+                ).timestamp())
+                builder.set_title("AutoSession is currently enabled.").set_color(discord.Colour.from_rgb(255,243,33))
+                builder.add_inline_field(name="Status", value="\🟡Cooldown")
+                builder.add_inline_field(name="Available soon...", value=f"<t:{ts}:t> (<t:{ts}:R>)")
 
         else:
-            embed.title = "AutoSession is currently disabled!"
-            embed.add_field(name="Status", value="\🔴Disabled", inline=True)
-            embed.add_field(name="Documentation", value="[View on GitHub](https://github.com/timraay/HLLLogUtilities#automatic-session-scheduling)", inline=True)
+            builder.set_title("AutoSession is currently disabled!").set_color(discord.Colour.from_rgb(235,49,64))
+            builder.add_inline_field(name="Status", value="\🔴Disabled")
+            builder.add_inline_field(
+                name="Documentation",
+                value="[View on GitHub](https://github.com/timraay/HLLLogUtilities#automatic-session-scheduling)",
+            )
 
         modifiers = self.credentials.default_modifiers
         if modifiers:
-            embed.add_field(name=f"Enabled modifiers ({len(modifiers)})", value="\n".join([
-                f"{m.config.emoji} [**{m.config.name}**]({MODIFIERS_URL}#{m.config.name.lower().replace(' ', '-')}) - {m.config.description}"
-                for m in modifiers.get_modifier_types()
-            ]), inline=False)
+            builder.add_modifiers_field(
+                title=f"Enabled modifiers ({len(modifiers)})",
+                modifiers=[
+                    f"{m.config.emoji} [**{m.config.name}**]({MODIFIERS_URL}#{m.config.name.lower().replace(' ', '-')}) - {m.config.description}"
+                    for m in modifiers.get_modifier_types()
+                ],
+            )
 
-        return embed
+        return builder.build()
     
     def __credentials_still_exist(func):
         @wraps(func)

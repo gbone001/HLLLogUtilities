@@ -9,7 +9,63 @@ import traceback
 from lib.exceptions import HSSConnectionError
 from utils import ttl_cache
 
-from typing import Callable, Optional, Union, List, Any
+from typing import Callable, Optional, Union, List, Any, Sequence
+
+
+class EmbedBuilder:
+    """Fluent helper for constructing Discord embeds consistently."""
+
+    def __init__(
+        self,
+        *,
+        title: str | None = None,
+        description: str | None = None,
+        color: discord.Colour | discord.Color | None = None,
+    ):
+        self._embed = discord.Embed(title=title, description=description, color=color)
+
+    def set_title(self, title: str):
+        self._embed.title = title
+        return self
+
+    def set_description(self, description: str):
+        self._embed.description = description
+        return self
+
+    def set_color(self, color: discord.Colour | discord.Color):
+        self._embed.color = color
+        return self
+
+    def set_author(self, *, name: str, icon_url: str | None = None):
+        self._embed.set_author(name=name, icon_url=icon_url)
+        return self
+
+    def set_footer(self, *, text: str | None = None, icon_url: str | None = None):
+        self._embed.set_footer(text=text, icon_url=icon_url)
+        return self
+
+    def set_thumbnail(self, url: str):
+        self._embed.set_thumbnail(url=url)
+        return self
+
+    def set_timestamp(self, timestamp: datetime):
+        self._embed.timestamp = timestamp
+        return self
+
+    def add_field(self, *, name: str, value: str, inline: bool = False):
+        self._embed.add_field(name=name, value=value, inline=inline)
+        return self
+
+    def add_inline_field(self, *, name: str, value: str):
+        return self.add_field(name=name, value=value, inline=True)
+
+    def add_modifiers_field(self, title: str, modifiers: Sequence[str]):
+        if modifiers:
+            self._embed.add_field(name=title, value="\n".join(modifiers), inline=False)
+        return self
+
+    def build(self) -> discord.Embed:
+        return self._embed
 
 class CallableButton(ui.Button):
     def __init__(self,
