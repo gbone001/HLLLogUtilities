@@ -7,7 +7,7 @@ from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Coroutine, Sequence
+from typing import Any, Callable, Coroutine, Sequence
 
 from utils import get_config
 
@@ -22,6 +22,9 @@ from .postgres import (
 
 LOGGER = logging.getLogger(__name__)
 QUEUE_WARN_THRESHOLD = 25
+MAX_CONCURRENT_WRITES = 10
+RETRY_INITIAL_DELAY = 0.5
+RETRY_MAX_DELAY = 30
 
 
 class StorageMode(str, Enum):
@@ -98,6 +101,8 @@ if STORAGE_MODE in (StorageMode.DUAL, StorageMode.POSTGRES) and not _POSTGRES_CO
 _pg_storage: PostgresStorage | None = None
 _pending_tasks: deque[asyncio.Task] = deque()
 _partition_cache: set[str] = set()
+_concurrency_gate = asyncio.Semaphore(MAX_CONCURRENT_WRITES)
+_shutting_down = False
 
 
 def get_storage_mode() -> StorageMode:
@@ -116,8 +121,58 @@ def pending_task_count() -> int:
     return len(_pending_tasks)
 
 
+def _replication_enabled() -> bool:
+    return should_write_to_postgres() and not _shutting_down
+
+
+async def _wait_for_storage(label: str) -> None:
+    while True:
+        if _shutting_down:
+            raise RuntimeError(f"Postgres storage shutting down during {label}")
+        if _pg_storage is not None:
+            return
+        LOGGER.debug("Postgres storage not ready for %s; waiting", label)
+        await asyncio.sleep(0.5)
+
+
+def _get_storage() -> PostgresStorage:
+    if not _pg_storage:
+        raise RuntimeError("Postgres storage is not connected")
+    return _pg_storage
+
+
+async def _execute_with_retry(coro_factory: Callable[[], Coroutine[Any, Any, Any]], label: str) -> None:
+    delay = RETRY_INITIAL_DELAY
+    while True:
+        await _wait_for_storage(label)
+        if _shutting_down:
+            LOGGER.debug("Skipping %s because storage is shutting down", label)
+            return
+        try:
+            async with _concurrency_gate:
+                await coro_factory()
+            return
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            LOGGER.exception("Postgres task '%s' failed; retrying in %.1fs", label, delay)
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, RETRY_MAX_DELAY)
+
+
+async def _drain_pending_tasks(timeout: float = 30.0) -> None:
+    if not _pending_tasks:
+        return
+    tasks = tuple(_pending_tasks)
+    try:
+        await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=timeout)
+    except asyncio.TimeoutError:
+        LOGGER.warning("Timed out waiting for %s postgres tasks to finish", len(tasks))
+
+
 async def startup() -> None:
-    global _pg_storage
+    global _pg_storage, _shutting_down
+    _shutting_down = False
     if not should_write_to_postgres():
         if STORAGE_MODE in (StorageMode.DUAL, StorageMode.POSTGRES):
             LOGGER.warning("Storage mode %s enabled but no Database.Url configured", STORAGE_MODE.value)
@@ -135,7 +190,9 @@ async def startup() -> None:
 
 
 async def shutdown() -> None:
-    global _pg_storage
+    global _pg_storage, _shutting_down
+    _shutting_down = True
+    await _drain_pending_tasks()
     if _pg_storage:
         await _pg_storage.close()
         _pg_storage = None
@@ -160,23 +217,20 @@ def _track_task(task: asyncio.Task, label: str) -> None:
     task.add_done_callback(_task_done)
 
 
-def _schedule(coro: Coroutine[Any, Any, Any], label: str) -> None:
+def _schedule(coro_factory: Callable[[], Coroutine[Any, Any, Any]], label: str) -> None:
+    if not _replication_enabled():
+        return
+
+    async def _runner() -> None:
+        await _execute_with_retry(coro_factory, label)
+
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
-        asyncio.run(coro)
+        asyncio.run(_runner())
         return
-    task = loop.create_task(coro, name=label)
+    task = loop.create_task(_runner(), name=label)
     _track_task(task, label)
-
-
-def _ensure_storage(label: str) -> bool:
-    if not should_write_to_postgres():
-        return False
-    if not _pg_storage:
-        LOGGER.warning("Postgres storage not ready for %s", label)
-        return False
-    return True
 
 
 def _normalize_month(dt: datetime) -> datetime:
@@ -204,11 +258,11 @@ async def _ensure_partitions_for_logs(logs: Sequence[LogLine]) -> None:
 
 
 def replicate_session(record: SessionReplica) -> None:
-    if not _ensure_storage("session-upsert"):
+    if not _replication_enabled():
         return
 
     async def _run() -> None:
-        assert _pg_storage
+        storage = _get_storage()
         params = SessionCreateParams(
             guild_id=record.guild_id,
             name=record.name,
@@ -219,71 +273,71 @@ def replicate_session(record: SessionReplica) -> None:
             modifier_flags=record.modifier_flags,
             session_id=record.session_id,
         )
-        await _pg_storage.create_session(params)
+        await storage.create_session(params)
 
-    _schedule(_run(), f"pg-session-{record.session_id}")
+    _schedule(_run, f"pg-session-{record.session_id}")
 
 
 def replicate_session_deletion(session_id: int) -> None:
-    if not _ensure_storage("session-delete"):
+    if not _replication_enabled():
         return
 
     async def _run() -> None:
-        assert _pg_storage
-        await _pg_storage.delete_session(session_id)
+        storage = _get_storage()
+        await storage.delete_session(session_id)
 
-    _schedule(_run(), f"pg-session-delete-{session_id}")
+    _schedule(_run, f"pg-session-delete-{session_id}")
 
 
 def replicate_session_mark_deleted(session_id: int, deleted_at: datetime | None = None) -> None:
-    if not _ensure_storage("session-mark-deleted"):
+    if not _replication_enabled():
         return
 
     async def _run() -> None:
-        assert _pg_storage
-        await _pg_storage.mark_session_deleted(session_id, deleted_at)
+        storage = _get_storage()
+        await storage.mark_session_deleted(session_id, deleted_at)
 
-    _schedule(_run(), f"pg-session-mark-deleted-{session_id}")
+    _schedule(_run, f"pg-session-mark-deleted-{session_id}")
 
 
 def replicate_session_logs(session_id: int, logs: Sequence[LogLine]) -> None:
-    if not logs or not _ensure_storage("session-logs"):
+    if not logs or not _replication_enabled():
         return
     payload = [log.model_copy(deep=True) for log in logs]
 
     async def _run() -> None:
-        assert _pg_storage
+        storage = _get_storage()
         await _ensure_partitions_for_logs(payload)
-        await _pg_storage.insert_logs(session_id, payload)
+        await storage.insert_logs(session_id, payload)
 
-    _schedule(_run(), f"pg-session-logs-{session_id}")
+    _schedule(_run, f"pg-session-logs-{session_id}")
 
 
 def replicate_session_log_purge(session_id: int) -> None:
-    if not _ensure_storage("session-log-purge"):
+    if not _replication_enabled():
         return
 
     async def _run() -> None:
-        assert _pg_storage
-        deleted = await _pg_storage.purge_session_logs(session_id)
+        storage = _get_storage()
+        deleted = await storage.purge_session_logs(session_id)
         LOGGER.info("Purged %s log rows for session %s", deleted, session_id)
 
-    _schedule(_run(), f"pg-session-log-purge-{session_id}")
+    _schedule(_run, f"pg-session-log-purge-{session_id}")
 
 
 def replicate_credentials(record: CredentialReplica) -> None:
-    if not _ensure_storage("credentials-upsert"):
+    if not _replication_enabled():
         return
 
     async def _run() -> None:
-        assert _pg_storage
+        storage = _get_storage()
         query = (
             "INSERT INTO credentials (id, guild_id, name, address, port, password, default_modifiers, autosession_enabled) "
             "VALUES ($1,$2,$3,$4,$5,$6,$7,$8) "
             "ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name, address=EXCLUDED.address, port=EXCLUDED.port, "
             "password=EXCLUDED.password, default_modifiers=EXCLUDED.default_modifiers, autosession_enabled=EXCLUDED.autosession_enabled"
         )
-        async with _pg_storage.pool.acquire() as conn:
+        async with storage.pool.acquire() as conn:
             await conn.execute(
                 query,
                 record.id,
@@ -296,44 +350,44 @@ def replicate_credentials(record: CredentialReplica) -> None:
                 record.autosession_enabled,
             )
 
-    _schedule(_run(), f"pg-credentials-{record.id}")
+    _schedule(_run, f"pg-credentials-{record.id}")
 
 
 def delete_credentials(credential_id: int) -> None:
-    if not _ensure_storage("credentials-delete"):
+    if not _replication_enabled():
         return
 
     async def _run() -> None:
-        assert _pg_storage
-        async with _pg_storage.pool.acquire() as conn:
+        storage = _get_storage()
+        async with storage.pool.acquire() as conn:
             await conn.execute("DELETE FROM credentials WHERE id = $1", credential_id)
 
-    _schedule(_run(), f"pg-credentials-delete-{credential_id}")
+    _schedule(_run, f"pg-credentials-delete-{credential_id}")
 
 
 def replicate_api_key(record: ApiKeyReplica) -> None:
-    if not _ensure_storage("api-key-upsert"):
+    if not _replication_enabled():
         return
 
     async def _run() -> None:
-        assert _pg_storage
+        storage = _get_storage()
         query = (
             "INSERT INTO hss_api_keys (id, guild_id, tag, key) VALUES ($1,$2,$3,$4) "
             "ON CONFLICT (id) DO UPDATE SET tag=EXCLUDED.tag, key=EXCLUDED.key"
         )
-        async with _pg_storage.pool.acquire() as conn:
+        async with storage.pool.acquire() as conn:
             await conn.execute(query, record.id, record.guild_id, record.tag, record.key)
 
-    _schedule(_run(), f"pg-api-key-{record.id}")
+    _schedule(_run, f"pg-api-key-{record.id}")
 
 
 def delete_api_key(api_key_id: int) -> None:
-    if not _ensure_storage("api-key-delete"):
+    if not _replication_enabled():
         return
 
     async def _run() -> None:
-        assert _pg_storage
-        async with _pg_storage.pool.acquire() as conn:
+        storage = _get_storage()
+        async with storage.pool.acquire() as conn:
             await conn.execute("DELETE FROM hss_api_keys WHERE id = $1", api_key_id)
 
-    _schedule(_run(), f"pg-api-key-delete-{api_key_id}")
+    _schedule(_run, f"pg-api-key-delete-{api_key_id}")
