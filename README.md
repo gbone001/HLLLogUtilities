@@ -13,6 +13,17 @@ HLLLogUtilities (or HLU in short) is a Discord bot providing a clean interface t
 
 You can [invite HLU to your server](https://discord.com/oauth2/authorize?client_id=1033779011005980773&scope=bot+applications.commands&permissions=35840) right away with no costs whatsoever, or [host a private instance](#setup-guide) yourself!
 
+## **Persistent Game Data Storage**
+
+This repository adds a PostgreSQL-backed persistence path alongside the original SQLite storage so game data can be mirrored, migrated, and validated more safely as the project moves toward a more durable backend.
+
+- Adds a configurable `[Database]` section with `sqlite`, `dual`, and staged `postgres` storage modes.
+- Introduces a PostgreSQL storage runtime for sessions, credentials, HSS API keys, and partitioned session log storage.
+- Keeps SQLite as the current primary runtime store while `dual` mode mirrors new writes into PostgreSQL.
+- Includes a `scripts/sqlite_to_postgres.py` migration utility to backfill historical SQLite data into PostgreSQL.
+- Adds PostgreSQL schema definitions, integration tests, and CI coverage for the new storage layer.
+- Updates runtime and Docker guidance around Python 3.12 because the new async PostgreSQL stack depends on `asyncpg`.
+
 ## **Easy to use!**
 
 It takes only a few clicks to create a capture session and start recording logs. Just give a start and end time and select the server you want to record! From there on you can download the logs in formats such as `txt`, `csv` and `json`.
