@@ -205,7 +205,7 @@ Run the script again without `--dry-run` during maintenance windows to perform t
 
 The storage test suite (`tests/storage/test_postgres.py`) expects a live PostgreSQL instance. A ready-made Docker container named `hllu-pg` is already configured to expose port `6543` locally with default credentials (`postgres` / `postgres`).
 
-1. Ensure the container is running (`docker ps` should show `hllu-pg` based on `postgres:16`).
+1. Start the local PostgreSQL test container with `docker compose up -d hllu-pg`. After that, `docker ps` should show `hllu-pg` based on `postgres:16`.
 2. Point pytest at it by setting `POSTGRES_TEST_DSN=postgresql://postgres:postgres@127.0.0.1:6543/postgres`. Add the line below to your `.env` so VS Code and `python -m pytest` pick it up automatically:
 
 ```
