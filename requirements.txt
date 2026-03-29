@@ -6,3 +6,5 @@ python-dateutil
 sortedcontainers
 hllrcon==1.0.1
 psycopg[binary]>=3.2,<4
+Flask>=3.0,<4
+gunicorn>=23,<24

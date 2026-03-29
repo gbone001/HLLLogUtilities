@@ -2,20 +2,22 @@ import logging
 import json
 from datetime import datetime, timezone
 import os
+import time
 from pypika import Table, Query
 import sqlite3
 from typing import Any, Sequence
 import psycopg
+from psycopg.conninfo import conninfo_to_dict, make_conninfo
 from psycopg.types.json import Jsonb
 
 from lib.logs import LogLine
-from utils import get_config
+from utils import SESSIONS_DB_PATH, get_config
 
 DB_VERSION = 7
 HLU_VERSION = "v2.2.15"
 ARCHIVE_DB_VERSION = 1
 
-database = sqlite3.connect('sessions.db')
+database = sqlite3.connect(str(SESSIONS_DB_PATH))
 cursor = database.cursor()
 
 config = get_config()
@@ -25,13 +27,39 @@ def _config_value(section: str, option: str, fallback: str) -> str:
         return config.get(section, option)
     return fallback
 
-archive_database = psycopg.connect(
-    host=os.getenv('HLU_POSTGRES_HOST', _config_value('Database', 'Host', 'localhost')),
-    port=os.getenv('HLU_POSTGRES_PORT', _config_value('Database', 'Port', '5432')),
-    dbname=os.getenv('HLU_POSTGRES_DB', _config_value('Database', 'Name', 'hll_logs')),
-    user=os.getenv('HLU_POSTGRES_USER', _config_value('Database', 'User', 'hll')),
-    password=os.getenv('HLU_POSTGRES_PASSWORD', _config_value('Database', 'Password', 'hll')),
-)
+def _build_archive_conninfo() -> str:
+    database_url = os.getenv("DATABASE_URL")
+    if database_url:
+        conninfo = conninfo_to_dict(database_url)
+        conninfo.setdefault("connect_timeout", "10")
+        return make_conninfo(**conninfo)
+
+    return make_conninfo(
+        host=os.getenv('HLU_POSTGRES_HOST', os.getenv('PGHOST', _config_value('Database', 'Host', 'localhost'))),
+        port=os.getenv('HLU_POSTGRES_PORT', os.getenv('PGPORT', _config_value('Database', 'Port', '5432'))),
+        dbname=os.getenv('HLU_POSTGRES_DB', os.getenv('PGDATABASE', _config_value('Database', 'Name', 'hll_logs'))),
+        user=os.getenv('HLU_POSTGRES_USER', os.getenv('PGUSER', _config_value('Database', 'User', 'hll'))),
+        password=os.getenv('HLU_POSTGRES_PASSWORD', os.getenv('PGPASSWORD', _config_value('Database', 'Password', 'hll'))),
+        connect_timeout="10",
+    )
+
+
+def _connect_archive_database(retries: int = 8, delay_seconds: float = 2.0):
+    last_exc: Exception | None = None
+    for attempt in range(1, retries + 1):
+        try:
+            return psycopg.connect(_build_archive_conninfo())
+        except Exception as exc:
+            last_exc = exc
+            if attempt == retries:
+                break
+            logging.warning("PostgreSQL connection attempt %s/%s failed: %s", attempt, retries, exc)
+            time.sleep(delay_seconds)
+    assert last_exc is not None
+    raise last_exc
+
+
+archive_database = _connect_archive_database()
 archive_cursor = archive_database.cursor()
 
 cursor.execute("""
@@ -190,6 +218,47 @@ CREATE TABLE IF NOT EXISTS "matches" (
     "status" TEXT NOT NULL,
     "created_at" TIMESTAMPTZ NOT NULL,
     "updated_at" TIMESTAMPTZ NOT NULL
+);
+""")
+archive_cursor.execute("""
+CREATE TABLE IF NOT EXISTS "manual_uploads" (
+    "id" BIGSERIAL PRIMARY KEY,
+    "session_name" TEXT NOT NULL,
+    "server_name" TEXT,
+    "source_filename" TEXT NOT NULL,
+    "content_type" TEXT,
+    "file_format" TEXT NOT NULL,
+    "uploader_name" TEXT,
+    "notes" TEXT,
+    "start_time" TIMESTAMPTZ,
+    "end_time" TIMESTAMPTZ,
+    "log_count" INTEGER NOT NULL DEFAULT 0,
+    "parsed_log_count" INTEGER NOT NULL DEFAULT 0,
+    "raw_text" TEXT NOT NULL,
+    "created_at" TIMESTAMPTZ NOT NULL,
+    "metadata_json" JSONB NOT NULL DEFAULT '{}'::jsonb
+);
+""")
+archive_cursor.execute("""
+CREATE TABLE IF NOT EXISTS "manual_upload_logs" (
+    "id" BIGSERIAL PRIMARY KEY,
+    "upload_id" BIGINT NOT NULL,
+    "event_time" TIMESTAMPTZ,
+    "event_type" TEXT,
+    "log_json" JSONB NOT NULL
+);
+""")
+archive_cursor.execute("""
+CREATE TABLE IF NOT EXISTS "manual_upload_matches" (
+    "id" BIGSERIAL PRIMARY KEY,
+    "upload_id" BIGINT NOT NULL,
+    "map_name" TEXT,
+    "start_time" TIMESTAMPTZ,
+    "end_time" TIMESTAMPTZ,
+    "duration_seconds" INTEGER,
+    "allied_score" INTEGER,
+    "axis_score" INTEGER,
+    "player_count" INTEGER NOT NULL DEFAULT 0
 );
 """)
 archive_database.commit()
@@ -671,3 +740,174 @@ def insert_events(session_id: int, events: Sequence[Any], logs: Sequence[LogLine
         _upsert_match_from_event(session_id, event_type, event.event_time, event_payload, log)
 
     archive_database.commit()
+
+
+def create_manual_upload(
+    *,
+    session_name: str,
+    server_name: str | None,
+    source_filename: str,
+    content_type: str | None,
+    file_format: str,
+    uploader_name: str | None,
+    notes: str | None,
+    raw_text: str,
+    logs: Sequence[LogLine],
+    metadata: dict[str, Any] | None = None,
+) -> int:
+    now = datetime.now(timezone.utc)
+    start_time = logs[0].event_time if logs else None
+    end_time = logs[-1].event_time if logs else None
+    archive_cursor.execute(
+        """
+        INSERT INTO manual_uploads (
+            session_name, server_name, source_filename, content_type, file_format, uploader_name, notes,
+            start_time, end_time, log_count, parsed_log_count, raw_text, created_at, metadata_json
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        RETURNING id
+        """,
+        (
+            session_name,
+            server_name,
+            source_filename,
+            content_type,
+            file_format,
+            uploader_name,
+            notes,
+            start_time,
+            end_time,
+            len(logs),
+            len(logs),
+            raw_text,
+            now,
+            Jsonb(metadata or {}),
+        ),
+    )
+    upload_id = archive_cursor.fetchone()[0]
+
+    if logs:
+        archive_cursor.executemany(
+            """
+            INSERT INTO manual_upload_logs (upload_id, event_time, event_type, log_json)
+            VALUES (%s, %s, %s, %s)
+            """,
+            [
+                (
+                    upload_id,
+                    log.event_time,
+                    log.event_type,
+                    _serialize_log_line(log),
+                )
+                for log in logs
+            ],
+        )
+
+    archive_database.commit()
+    return upload_id
+
+
+def create_manual_upload_with_unparsed_file(
+    *,
+    session_name: str,
+    server_name: str | None,
+    source_filename: str,
+    content_type: str | None,
+    file_format: str,
+    uploader_name: str | None,
+    notes: str | None,
+    raw_text: str,
+    metadata: dict[str, Any] | None = None,
+) -> int:
+    now = datetime.now(timezone.utc)
+    archive_cursor.execute(
+        """
+        INSERT INTO manual_uploads (
+            session_name, server_name, source_filename, content_type, file_format, uploader_name, notes,
+            log_count, parsed_log_count, raw_text, created_at, metadata_json
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        RETURNING id
+        """,
+        (
+            session_name,
+            server_name,
+            source_filename,
+            content_type,
+            file_format,
+            uploader_name,
+            notes,
+            0,
+            0,
+            raw_text,
+            now,
+            Jsonb(metadata or {}),
+        ),
+    )
+    upload_id = archive_cursor.fetchone()[0]
+    archive_database.commit()
+    return upload_id
+
+
+def insert_manual_upload_matches(upload_id: int, matches: Sequence[dict[str, Any]]):
+    if not matches:
+        return
+
+    archive_cursor.executemany(
+        """
+        INSERT INTO manual_upload_matches (
+            upload_id, map_name, start_time, end_time, duration_seconds, allied_score, axis_score, player_count
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        """,
+        [
+            (
+                upload_id,
+                match.get("map_name"),
+                match.get("start_time"),
+                match.get("end_time"),
+                match.get("duration_seconds"),
+                match.get("allied_score"),
+                match.get("axis_score"),
+                match.get("player_count", 0),
+            )
+            for match in matches
+        ],
+    )
+    archive_database.commit()
+
+
+def list_recent_manual_uploads(limit: int = 20) -> list[dict[str, Any]]:
+    archive_cursor.execute(
+        """
+        SELECT id, session_name, server_name, source_filename, file_format, uploader_name, notes,
+               start_time, end_time, log_count, parsed_log_count, created_at
+        FROM manual_uploads
+        ORDER BY created_at DESC
+        LIMIT %s
+        """,
+        (limit,),
+    )
+    rows = archive_cursor.fetchall()
+    keys = (
+        "id", "session_name", "server_name", "source_filename", "file_format", "uploader_name", "notes",
+        "start_time", "end_time", "log_count", "parsed_log_count", "created_at",
+    )
+    return [dict(zip(keys, row)) for row in rows]
+
+
+def list_recent_capture_sessions(limit: int = 20) -> list[dict[str, Any]]:
+    archive_cursor.execute(
+        """
+        SELECT session_id, name, server_name, start_time, planned_end_time, actual_end_time, deleted, created_at
+        FROM capture_sessions
+        ORDER BY created_at DESC
+        LIMIT %s
+        """,
+        (limit,),
+    )
+    rows = archive_cursor.fetchall()
+    keys = (
+        "session_id", "name", "server_name", "start_time", "planned_end_time", "actual_end_time", "deleted", "created_at",
+    )
+    return [dict(zip(keys, row)) for row in rows]

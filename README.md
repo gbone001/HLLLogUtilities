@@ -193,12 +193,23 @@ This terminal will need to stay open for the bot to work. Closing down this term
 ```shell
 sqlite3 sessions.db "VACUUM;"
 ```
-14. Start the containers! This also starts PostgreSQL for the archival game dataset, with its database files stored under `/data` inside the Postgres container.
+14. Start the containers! This also starts PostgreSQL for the archival game dataset, with its database files stored under `/data` inside the Postgres container, plus a web upload portal on port `8080` for manually ingesting exported HLU log files.
 ```shell
 docker-compose up -d
 ```
 
 These containers will run in the background, and restart automatically after a system reboot. In case you ever want to stop them, you can use the `docker-compose down` command.
+
+### Railway deployment
+
+Railway works best with this repo as two services from the same source:
+
+1. A worker service for the Discord bot using the default container command.
+2. A web service for manual uploads using the start command `gunicorn --bind 0.0.0.0:$PORT webapp:app`.
+
+For persistent local artifacts such as `sessions.db` and log files, attach a Railway volume and set `HLU_DATA_DIR` to that mounted path. The app will also automatically use `RAILWAY_VOLUME_MOUNT_PATH` when Railway provides it.
+
+For PostgreSQL, prefer wiring Railway's Postgres service through a reference variable like `DATABASE_URL=${{Postgres.DATABASE_URL}}`. The archive storage layer now accepts `DATABASE_URL` directly, and falls back to the explicit `HLU_POSTGRES_*` or `PG*` variables when needed.
 
 ### Discord permissions
 

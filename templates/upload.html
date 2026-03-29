@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>HLU Upload Portal</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='upload.css') }}">
+</head>
+<body>
+  <main class="shell">
+    <section class="hero">
+      <p class="eyebrow">Manual Ingest</p>
+      <h1>Upload HLL Log Utility exports into the shared game archive.</h1>
+      <p class="lede">This page stores manual HLU uploads in the same PostgreSQL dataset as live telemetry collected from the bot’s connected game servers.</p>
+    </section>
+
+    <section class="panel upload-panel">
+      <div class="panel-head">
+        <h2>Upload File</h2>
+        <p>Best results come from HLU `json` or `csv` exports. `txt` files are still stored even when they cannot be fully parsed.</p>
+      </div>
+
+      {% if error %}
+      <div class="flash flash-error">{{ error }}</div>
+      {% endif %}
+      {% if success %}
+      <div class="flash flash-success">{{ success }}</div>
+      {% endif %}
+
+      <form action="{{ url_for('upload') }}" method="post" enctype="multipart/form-data" class="upload-form">
+        <label>
+          <span>Session Name</span>
+          <input type="text" name="session_name" placeholder="Friday Event Finals" required>
+        </label>
+        <label>
+          <span>Server Name</span>
+          <input type="text" name="server_name" placeholder="AUS Competitive #1">
+        </label>
+        <label>
+          <span>Uploader</span>
+          <input type="text" name="uploader_name" placeholder="Ops Team">
+        </label>
+        <label class="full">
+          <span>Notes</span>
+          <textarea name="notes" rows="4" placeholder="Context, match notes, source details, or why this was uploaded manually."></textarea>
+        </label>
+        <label class="full file-drop">
+          <span>HLU Export File</span>
+          <input type="file" name="log_file" accept=".json,.csv,.txt,text/plain,application/json,text/csv" required>
+        </label>
+        <button type="submit">Store Upload</button>
+      </form>
+    </section>
+
+    <section class="grid">
+      <article class="panel">
+        <div class="panel-head">
+          <h2>Recent Manual Uploads</h2>
+          <p>Files added through this page.</p>
+        </div>
+        <div class="list">
+          {% for upload in recent_uploads %}
+          <div class="list-item">
+            <div>
+              <strong>{{ upload.session_name }}</strong>
+              <p>{{ upload.server_name or "Unknown server" }} · {{ upload.source_filename }}</p>
+            </div>
+            <div class="meta">
+              <span>{{ upload.file_format|upper }}</span>
+              <span>{{ upload.parsed_log_count }} logs</span>
+            </div>
+          </div>
+          {% else %}
+          <p class="empty">No manual uploads yet.</p>
+          {% endfor %}
+        </div>
+      </article>
+
+      <article class="panel">
+        <div class="panel-head">
+          <h2>Recent Live Sessions</h2>
+          <p>Telemetry captured directly from connected game servers.</p>
+        </div>
+        <div class="list">
+          {% for session in recent_sessions %}
+          <div class="list-item">
+            <div>
+              <strong>{{ session.name }}</strong>
+              <p>{{ session.server_name or "Unknown server" }}</p>
+            </div>
+            <div class="meta">
+              <span>#{{ session.session_id }}</span>
+              <span>{{ "deleted" if session.deleted else "active/archive" }}</span>
+            </div>
+          </div>
+          {% else %}
+          <p class="empty">No live sessions in the archive yet.</p>
+          {% endfor %}
+        </div>
+      </article>
+    </section>
+  </main>
+</body>
+</html>

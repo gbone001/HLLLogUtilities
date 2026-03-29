@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 import asyncio
 from pathlib import Path
+import os
 import re
 from typing import Coroutine
 
@@ -128,9 +129,21 @@ def schedule_coro(dt: datetime, coro_func, *args, error_logger = None): # How do
     return asyncio.create_task(scheduled_coro())
 
 
-LOGS_FOLDER = Path('logs')
-if not LOGS_FOLDER.exists():
-    LOGS_FOLDER.mkdir()
+def get_data_root() -> Path:
+    root = (
+        os.getenv("HLU_DATA_DIR")
+        or os.getenv("RAILWAY_VOLUME_MOUNT_PATH")
+        or "."
+    )
+    path = Path(root)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+DATA_ROOT = get_data_root()
+SESSIONS_DB_PATH = DATA_ROOT / "sessions.db"
+LOGS_FOLDER = DATA_ROOT / "logs"
+LOGS_FOLDER.mkdir(parents=True, exist_ok=True)
 
 def _get_logs_formatter(name: str = None, as_str: bool = False):
     if name:
