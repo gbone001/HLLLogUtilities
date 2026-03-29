@@ -193,12 +193,12 @@ This terminal will need to stay open for the bot to work. Closing down this term
 ```shell
 sqlite3 sessions.db "VACUUM;"
 ```
-14. Start the container!
+14. Start the containers! This also starts PostgreSQL for the archival game dataset, with its database files stored under `/data` inside the Postgres container.
 ```shell
 docker-compose up -d
 ```
 
-This container will run in the background, and restart automatically after a system reboot. In case you ever want to stop it, you can use the `docker-compose down` command.
+These containers will run in the background, and restart automatically after a system reboot. In case you ever want to stop them, you can use the `docker-compose down` command.
 
 ### Discord permissions
 

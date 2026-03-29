@@ -104,7 +104,7 @@ class LogLineBuilder:
             self.payload.update({
                 'player2_name': player.name,
                 'player2_id': player.id,
-                'player2_role': player.name,
+                'player2_role': player.role.name,
             })
             if team := player.get_team():
                 self.payload['player2_team'] = team.name

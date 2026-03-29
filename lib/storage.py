@@ -1,15 +1,38 @@
 import logging
+import json
+from datetime import datetime, timezone
+import os
 from pypika import Table, Query
 import sqlite3
-from typing import Sequence
+from typing import Any, Sequence
+import psycopg
+from psycopg.types.json import Jsonb
 
 from lib.logs import LogLine
+from utils import get_config
 
 DB_VERSION = 7
 HLU_VERSION = "v2.2.15"
+ARCHIVE_DB_VERSION = 1
 
 database = sqlite3.connect('sessions.db')
 cursor = database.cursor()
+
+config = get_config()
+
+def _config_value(section: str, option: str, fallback: str) -> str:
+    if config.has_section(section) and config.has_option(section, option):
+        return config.get(section, option)
+    return fallback
+
+archive_database = psycopg.connect(
+    host=os.getenv('HLU_POSTGRES_HOST', _config_value('Database', 'Host', 'localhost')),
+    port=os.getenv('HLU_POSTGRES_PORT', _config_value('Database', 'Port', '5432')),
+    dbname=os.getenv('HLU_POSTGRES_DB', _config_value('Database', 'Name', 'hll_logs')),
+    user=os.getenv('HLU_POSTGRES_USER', _config_value('Database', 'User', 'hll')),
+    password=os.getenv('HLU_POSTGRES_PASSWORD', _config_value('Database', 'Password', 'hll')),
+)
+archive_cursor = archive_database.cursor()
 
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS "db_version" (
@@ -52,6 +75,124 @@ INSERT INTO "db_version" ("format_version")
 """)
 
 database.commit()
+
+archive_cursor.execute("""
+CREATE TABLE IF NOT EXISTS "archive_db_version" (
+	"format_version"	INTEGER DEFAULT 1 NOT NULL
+);
+""")
+archive_cursor.execute("""
+INSERT INTO "archive_db_version" ("format_version")
+    SELECT 1 WHERE NOT EXISTS(
+        SELECT 1 FROM "archive_db_version"
+    );
+""")
+archive_cursor.execute("""
+CREATE TABLE IF NOT EXISTS "capture_sessions" (
+    "session_id" BIGINT PRIMARY KEY,
+    "guild_id" INTEGER NOT NULL,
+    "name" TEXT NOT NULL,
+    "credentials_id" INTEGER,
+    "server_name" TEXT,
+    "server_address" TEXT,
+    "server_port" INTEGER,
+    "modifiers" INTEGER NOT NULL DEFAULT 0,
+    "start_time" TIMESTAMPTZ NOT NULL,
+    "planned_end_time" TIMESTAMPTZ,
+    "actual_end_time" TIMESTAMPTZ,
+    "is_auto_session" BOOLEAN NOT NULL DEFAULT FALSE,
+    "deleted" BOOLEAN NOT NULL DEFAULT FALSE,
+    "created_at" TIMESTAMPTZ NOT NULL,
+    "updated_at" TIMESTAMPTZ NOT NULL
+);
+""")
+archive_cursor.execute("""
+CREATE TABLE IF NOT EXISTS "session_raw_logs" (
+    "id" BIGSERIAL PRIMARY KEY,
+    "session_id" BIGINT NOT NULL,
+    "event_time" TIMESTAMPTZ,
+    "log_line" TEXT NOT NULL,
+    "raw_line" TEXT NOT NULL,
+    "parsed" BOOLEAN NOT NULL DEFAULT FALSE,
+    "parse_error" TEXT,
+    "created_at" TIMESTAMPTZ NOT NULL
+);
+""")
+archive_cursor.execute("""
+CREATE TABLE IF NOT EXISTS "session_iterations" (
+    "id" BIGSERIAL PRIMARY KEY,
+    "session_id" BIGINT NOT NULL,
+    "captured_at" TIMESTAMPTZ NOT NULL,
+    "server_name" TEXT,
+    "server_map" TEXT,
+    "server_state" TEXT,
+    "round_start" TIMESTAMPTZ,
+    "max_players" INTEGER,
+    "player_count" INTEGER NOT NULL DEFAULT 0,
+    "squad_count" INTEGER NOT NULL DEFAULT 0,
+    "team1_score" INTEGER,
+    "team2_score" INTEGER,
+    "snapshot_json" JSONB NOT NULL
+);
+""")
+archive_cursor.execute("""
+CREATE TABLE IF NOT EXISTS "session_iteration_players" (
+    "iteration_id" BIGINT NOT NULL,
+    "session_id" BIGINT NOT NULL,
+    "captured_at" TIMESTAMPTZ NOT NULL,
+    "player_id" TEXT NOT NULL,
+    "name" TEXT,
+    "platform" TEXT,
+    "eos_id" TEXT,
+    "team_id" INTEGER,
+    "team_name" TEXT,
+    "team_faction" TEXT,
+    "squad_id" INTEGER,
+    "squad_name" TEXT,
+    "role" TEXT,
+    "loadout" TEXT,
+    "level" INTEGER,
+    "kills" INTEGER,
+    "deaths" INTEGER,
+    "combat_score" INTEGER,
+    "offense_score" INTEGER,
+    "defense_score" INTEGER,
+    "support_score" INTEGER,
+    "is_alive" BOOLEAN NOT NULL DEFAULT FALSE,
+    "is_spectator" BOOLEAN NOT NULL DEFAULT FALSE,
+    "location_x" REAL,
+    "location_y" REAL,
+    "location_z" REAL,
+    "joined_at" TIMESTAMPTZ
+);
+""")
+archive_cursor.execute("""
+CREATE TABLE IF NOT EXISTS "session_events" (
+    "id" BIGSERIAL PRIMARY KEY,
+    "session_id" BIGINT NOT NULL,
+    "event_time" TIMESTAMPTZ NOT NULL,
+    "event_type" TEXT NOT NULL,
+    "log_json" JSONB,
+    "event_json" JSONB NOT NULL,
+    "created_at" TIMESTAMPTZ NOT NULL
+);
+""")
+archive_cursor.execute("""
+CREATE TABLE IF NOT EXISTS "matches" (
+    "id" BIGSERIAL PRIMARY KEY,
+    "session_id" BIGINT NOT NULL,
+    "start_time" TIMESTAMPTZ,
+    "end_time" TIMESTAMPTZ,
+    "map_name" TEXT,
+    "server_name" TEXT,
+    "allied_score" INTEGER,
+    "axis_score" INTEGER,
+    "status" TEXT NOT NULL,
+    "created_at" TIMESTAMPTZ NOT NULL,
+    "updated_at" TIMESTAMPTZ NOT NULL
+);
+""")
+archive_database.commit()
 
 
 def rename_table_columns(table_name: str, old: list[str], new: list[str]):
@@ -231,3 +372,302 @@ def delete_logs(sess_id: int):
     cursor.execute(str(drop_query))
     
     database.commit()
+
+
+def _json_dumps(payload: Any) -> str:
+    return json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+
+
+def _isoformat(value: Any) -> str | None:
+    if value is None:
+        return None
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return str(value)
+
+
+def _serialize_log_line(log: LogLine) -> Jsonb:
+    return Jsonb(log.model_dump(mode='json'))
+
+
+def _serialize_snapshot(snapshot: Any) -> dict[str, Any]:
+    server = snapshot.server
+    return {
+        "server": server.model_dump(mode='json') if server else None,
+        "teams": [team.model_dump(mode='json') for team in snapshot.teams],
+        "squads": [squad.model_dump(mode='json') for squad in snapshot.squads],
+        "disbanded_squads": [squad.model_dump(mode='json') for squad in snapshot.disbanded_squads],
+        "players": [player.model_dump(mode='json') for player in snapshot.players],
+        "disconnected_players": [player.model_dump(mode='json') for player in snapshot.disconnected_players],
+    }
+
+
+def sync_capture_session(session: Any):
+    now = datetime.now(timezone.utc)
+    archive_cursor.execute(
+        """
+        INSERT INTO capture_sessions (
+            session_id, guild_id, name, credentials_id, server_name, server_address, server_port,
+            modifiers, start_time, planned_end_time, actual_end_time, is_auto_session, deleted, created_at, updated_at
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT(session_id) DO UPDATE SET
+            guild_id = excluded.guild_id,
+            name = excluded.name,
+            credentials_id = excluded.credentials_id,
+            server_name = excluded.server_name,
+            server_address = excluded.server_address,
+            server_port = excluded.server_port,
+            modifiers = excluded.modifiers,
+            start_time = excluded.start_time,
+            planned_end_time = excluded.planned_end_time,
+            actual_end_time = excluded.actual_end_time,
+            is_auto_session = excluded.is_auto_session,
+            deleted = excluded.deleted,
+            updated_at = excluded.updated_at
+        """,
+        (
+            session.id,
+            session.guild_id,
+            session.name,
+            session.credentials.id if session.credentials else None,
+            session.credentials.name if session.credentials else None,
+            session.credentials.address if session.credentials else None,
+            session.credentials.port if session.credentials else None,
+            session.modifier_flags.value,
+            session.start_time,
+            None if session.is_auto_session else session.end_time,
+            session.end_time if session.active_in() is False else None,
+            bool(session.is_auto_session),
+            False,
+            now,
+            now,
+        ),
+    )
+    archive_database.commit()
+
+
+def mark_capture_session_deleted(session: Any):
+    archive_cursor.execute(
+        """
+        UPDATE capture_sessions
+        SET deleted = 1,
+            actual_end_time = COALESCE(actual_end_time, %s),
+            updated_at = %s
+        WHERE session_id = %s
+        """,
+        (session.end_time, datetime.now(timezone.utc), session.id),
+    )
+    archive_database.commit()
+
+
+def insert_raw_logs(session_id: int, raw_logs: Sequence[dict[str, Any]]):
+    if not raw_logs:
+        return
+
+    now = datetime.now(timezone.utc)
+    archive_cursor.executemany(
+        """
+        INSERT INTO session_raw_logs (session_id, event_time, log_line, raw_line, parsed, parse_error, created_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        """,
+        [
+            (
+                session_id,
+                log.get("event_time"),
+                log.get("log", ""),
+                log.get("raw", log.get("log", "")),
+                bool(log.get("parsed", False)),
+                log.get("parse_error"),
+                now,
+            )
+            for log in raw_logs
+        ],
+    )
+    archive_database.commit()
+
+
+def insert_snapshot(session_id: int, captured_at: Any, snapshot: Any):
+    payload = _serialize_snapshot(snapshot)
+    server = snapshot.server
+    team1 = snapshot.teams[0] if len(snapshot.teams) > 0 else None
+    team2 = snapshot.teams[1] if len(snapshot.teams) > 1 else None
+
+    archive_cursor.execute(
+        """
+        INSERT INTO session_iterations (
+            session_id, captured_at, server_name, server_map, server_state, round_start, max_players,
+            player_count, squad_count, team1_score, team2_score, snapshot_json
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        RETURNING id
+        """,
+        (
+            session_id,
+            captured_at,
+            server.name if server else None,
+            server.map if server else None,
+            server.state if server else None,
+            server.round_start if server else None,
+            server.max_players if server else None,
+            len(snapshot.players),
+            len(snapshot.squads),
+            team1.score if team1 else None,
+            team2.score if team2 else None,
+            Jsonb(payload),
+        ),
+    )
+    iteration_id = archive_cursor.fetchone()[0]
+
+    if iteration_id is not None and snapshot.players:
+        archive_cursor.executemany(
+            """
+            INSERT INTO session_iteration_players (
+                iteration_id, session_id, captured_at, player_id, name, platform, eos_id, team_id, team_name,
+                team_faction, squad_id, squad_name, role, loadout, level, kills, deaths, combat_score,
+                offense_score, defense_score, support_score, is_alive, is_spectator, location_x, location_y,
+                location_z, joined_at
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            [
+                (
+                    iteration_id,
+                    session_id,
+                    captured_at,
+                    player.id,
+                    player.name,
+                    str(player.platform),
+                    player.eos_id,
+                    player.team_id,
+                    team.name if (team := player.get_team()) else None,
+                    team.faction if team else None,
+                    player.squad_id,
+                    squad.name if (squad := player.get_squad()) else None,
+                    player.role.name,
+                    player.loadout,
+                    player.level,
+                    player.kills,
+                    player.deaths,
+                    player.score.combat,
+                    player.score.offense,
+                    player.score.defense,
+                    player.score.support,
+                    bool(player.is_alive),
+                    bool(player.is_spectator),
+                    player.location[0],
+                    player.location[1],
+                    player.location[2],
+                    player.joined_at,
+                )
+                for player in snapshot.players
+            ],
+        )
+
+    archive_database.commit()
+    return iteration_id
+
+
+def _parse_match_score(score: str | None) -> tuple[int | None, int | None]:
+    if not score or " - " not in score:
+        return None, None
+    allied, axis = score.split(" - ", 1)
+    try:
+        return int(allied), int(axis)
+    except ValueError:
+        return None, None
+
+
+def _upsert_match_from_event(session_id: int, event_type: str, event_time: Any, event_payload: dict[str, Any], log: LogLine | None):
+    now = datetime.now(timezone.utc)
+
+    if event_type == "server_match_start":
+        map_name = event_payload.get("map_name") or (log.new if log else None)
+        archive_cursor.execute(
+            """
+            INSERT INTO matches (session_id, start_time, map_name, server_name, status, created_at, updated_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                session_id,
+                event_time,
+                map_name,
+                event_payload.get("server_name"),
+                "in_progress",
+                now,
+                now,
+            ),
+        )
+        return
+
+    if event_type != "server_match_end":
+        return
+
+    map_name = event_payload.get("map_name") or (log.new if log else None)
+    allied_score, axis_score = _parse_match_score(event_payload.get("score") or (log.message if log else None))
+    archive_cursor.execute(
+        """
+        SELECT id FROM matches
+        WHERE session_id = %s AND end_time IS NULL
+        ORDER BY start_time DESC NULLS LAST, id DESC
+        LIMIT 1
+        """,
+        (session_id,),
+    )
+    row = archive_cursor.fetchone()
+
+    if row:
+        archive_cursor.execute(
+            """
+            UPDATE matches
+            SET end_time = %s, map_name = COALESCE(map_name, %s), allied_score = %s, axis_score = %s, status = %s, updated_at = %s
+            WHERE id = %s
+            """,
+            (event_time, map_name, allied_score, axis_score, "completed", now, row[0]),
+        )
+    else:
+        archive_cursor.execute(
+            """
+            INSERT INTO matches (
+                session_id, start_time, end_time, map_name, allied_score, axis_score, status, created_at, updated_at
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                session_id,
+                event_time,
+                event_time,
+                map_name,
+                allied_score,
+                axis_score,
+                "completed",
+                now,
+                now,
+            ),
+        )
+
+
+def insert_events(session_id: int, events: Sequence[Any], logs: Sequence[LogLine]):
+    if not events:
+        return
+
+    now = datetime.now(timezone.utc)
+    for event, log in zip(events, logs):
+        event_payload = event.model_dump(mode='json')
+        event_type = event.get_type().name
+        archive_cursor.execute(
+            """
+            INSERT INTO session_events (session_id, event_time, event_type, log_json, event_json, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            """,
+            (
+                session_id,
+                event.event_time,
+                event_type,
+                _serialize_log_line(log),
+                Jsonb(event_payload),
+                now,
+            ),
+        )
+        _upsert_match_from_event(session_id, event_type, event.event_time, event_payload, log)
+
+    archive_database.commit()

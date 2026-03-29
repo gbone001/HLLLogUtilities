@@ -11,7 +11,18 @@ from lib.flags import EventFlags
 from lib.modifiers import ModifierFlags, Modifier, INTERNAL_MODIFIERS
 from lib.rcon import HLLRcon
 from lib.rcon.models import ActivationEvent, DeactivationEvent, EventModel, IterationEvent, PrivateEventModel, Snapshot
-from lib.storage import LogLine, database, cursor, insert_many_logs, delete_logs
+from lib.storage import (
+    LogLine,
+    database,
+    cursor,
+    delete_logs,
+    insert_events,
+    insert_many_logs,
+    insert_raw_logs,
+    insert_snapshot,
+    mark_capture_session_deleted,
+    sync_capture_session,
+)
 from utils import get_config, schedule_coro, get_logger
 
 SECONDS_BETWEEN_ITERATIONS = get_config().getint('Session', 'SecondsBetweenIterations')
@@ -75,6 +86,7 @@ class HLLCaptureSession:
         self.sent_helo_prompt_indices = list()
 
         SESSIONS[self.id] = self
+        sync_capture_session(self)
         
     @classmethod
     def load_from_db(cls, id: int):
@@ -161,6 +173,7 @@ class HLLCaptureSession:
             (self.name, self.start_time, self.end_time if not self.is_auto_session else None, self.credentials.id if self.credentials else None,
              self.modifier_flags.value, self.id))
         database.commit()
+        sync_capture_session(self)
 
     def active_in(self) -> Union[timedelta, bool]:
         """Returns how long until the session should start. Otherwise
@@ -174,7 +187,7 @@ class HLLCaptureSession:
         """
         now = datetime.now(tz=timezone.utc)
         if self.start_time > now:
-            return now - self.start_time
+            return self.start_time - now
         elif self.end_time:
             return self.end_time > now
         else:
@@ -235,6 +248,15 @@ class HLLCaptureSession:
         except Exception:
             self.logger.exception("Failed to create snapshot")
         else:
+            insert_raw_logs(self.id, self.rcon.recent_raw_logs)
+            captured_at = max(
+                [event.event_time for event in snapshot.events],
+                default=datetime.now(tz=timezone.utc),
+            )
+            insert_snapshot(self.id, captured_at, snapshot)
+
+            public_events = list()
+            public_logs = list()
             events = [IterationEvent(snapshot=snapshot)] + snapshot.events
             for event in events:
                 if not isinstance(event, PrivateEventModel):
@@ -244,10 +266,14 @@ class HLLCaptureSession:
                         self.logger.exception('Failed to cast event to log line: %s %s' % (type(event).__name__, event.model_dump()))
                     else:
                         self._logs.append(log)
+                        public_events.append(event)
+                        public_logs.append(log)
                 
                 for modifier in self.modifiers:
                     for listener in modifier.get_listeners_for_event(event):
                         asyncio.create_task(listener.invoke(modifier, event))
+
+            insert_events(self.id, public_events, public_logs)
                 
             if len(self._logs) > NUM_LOGS_REQUIRED_FOR_INSERT:
                 self.push_to_db()
@@ -294,6 +320,7 @@ class HLLCaptureSession:
             except Exception:
                 self.logger.exception('Failed to stop RCON')
         self.push_to_db()
+        sync_capture_session(self)
 
     def _clear_tasks(self):
         if self._start_task and not self._start_task.done():
@@ -375,12 +402,14 @@ class HLLCaptureSession:
         self.logger.info('Deleting session...')
         schedule_coro(datetime.now(tz=timezone.utc), self.deactivate, error_logger=self.logger)
         self._clear_tasks()
+        self.push_to_db()
         delete_logs(sess_id=self.id)
 
         table = Table("sessions")
         update_query = table.update().set(table.deleted, True).where(table.ROWID == self.id)
         cursor.execute(str(update_query))
         database.commit()
+        mark_capture_session_deleted(self)
         
         del SESSIONS[self.id]
 

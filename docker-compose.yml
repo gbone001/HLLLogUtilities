@@ -1,11 +1,33 @@
 version: '2.4'
 
 services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: hll_logs
+      POSTGRES_USER: hll
+      POSTGRES_PASSWORD: hll
+      PGDATA: /data/postgres
+    volumes:
+      - postgres_data:/data
+
   hlllogutilities:
     mem_limit: 512m
     restart: unless-stopped
     build: .
+    depends_on:
+      - postgres
+    environment:
+      HLU_POSTGRES_HOST: postgres
+      HLU_POSTGRES_PORT: 5432
+      HLU_POSTGRES_DB: hll_logs
+      HLU_POSTGRES_USER: hll
+      HLU_POSTGRES_PASSWORD: hll
     volumes:
       - ./config.ini:/code/config.ini
       # TODO: Sessions is not created before started first (unless done manually)
       - ./sessions.db:/code/sessions.db
+
+volumes:
+  postgres_data:

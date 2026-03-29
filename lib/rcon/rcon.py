@@ -25,6 +25,7 @@ class HLLRcon:
 
         self.snapshot: Snapshot | None = None
         self._snapshot = Snapshot()
+        self._recent_raw_logs: list[dict] = []
 
         self._logs_last_seen_content = ""
         self._logs_last_seen_time = datetime.now(tz=timezone.utc)
@@ -76,6 +77,7 @@ class HLLRcon:
 
     async def create_snapshot(self):
         self._snapshot = Snapshot()
+        self._recent_raw_logs = []
         logs_last_seen_time = await self._fetch_logs()
         await self._fetch_server_state()
 
@@ -89,6 +91,10 @@ class HLLRcon:
 
         self.snapshot = self._snapshot
         return self.snapshot
+
+    @property
+    def recent_raw_logs(self):
+        return tuple(self._recent_raw_logs)
     
     async def _fetch_logs(self) -> datetime | None:
         response = await self.client.get_admin_log(seconds_span=30)
@@ -98,6 +104,13 @@ class HLLRcon:
         log: str = ""
 
         for entry in response.entries:
+            raw_entry = {
+                "event_time": None,
+                "log": entry.message,
+                "raw": entry.message,
+                "parsed": False,
+                "parse_error": None,
+            }
             try:
                 match = re.match(r"^\[.+? \((?P<timestamp>\d+)\)\] (?P<log>[\w\W]+)$", entry.message, flags=re.M)
                 if not match:
@@ -107,6 +120,10 @@ class HLLRcon:
                 log = match.group("log")
 
                 time = datetime.fromtimestamp(timestamp).astimezone(timezone.utc)
+                raw_entry.update({
+                    "event_time": time,
+                    "log": log,
+                })
 
                 if skip:
                     # Avoid duplicates
@@ -119,8 +136,12 @@ class HLLRcon:
                 skip = False
 
                 self._parse_log(time, log)
-            except Exception:
+                raw_entry["parsed"] = True
+            except Exception as exc:
+                raw_entry["parse_error"] = str(exc)
                 self.logger.exception("Failed to parse log line: %s", entry.message)
+            finally:
+                self._recent_raw_logs.append(raw_entry)
 
         if time:
             self._logs_last_seen_time = time
@@ -154,7 +175,8 @@ class HLLRcon:
             event = e_cls.model_validate(data)
             self._snapshot.add_event(event)
 
-            self._logged_deaths[event.player_id] = self._logged_deaths.get(event.player_id, 0) + 1
+            self._logged_deaths[event.victim_id] = self._logged_deaths.get(event.victim_id, 0) + 1
+            self._last_death_time[event.victim_id] = event_time
 
         elif log.startswith('CHAT'):
             data = RE_LOG_CHAT.match(log).groupdict() # type: ignore
@@ -199,7 +221,8 @@ class HLLRcon:
             event = ServerMatchStartedEvent.model_validate(data)
             self._snapshot.add_event(event)
 
-            self._state = "warmup"
+            self._match_state = "warmup"
+            self._match_start_time = event_time
             if isinstance(self._end_warmup_handle, asyncio.TimerHandle):
                 self._end_warmup_handle.cancel()
             self._end_warmup_handle = self.loop.call_later(180, self.__enter_playing_state)
@@ -215,7 +238,7 @@ class HLLRcon:
 
             event = ServerMatchEndedEvent.model_validate(data)
             self._snapshot.add_event(event)
-            self._state = "end_of_round"
+            self._match_state = "end_of_round"
 
             # Cancel the timer responsible for triggering the Warmup Ended event
             if isinstance(self._end_warmup_handle, asyncio.TimerHandle):
@@ -336,6 +359,7 @@ class HLLRcon:
             self._snapshot.add_event(
                 ServerWarmupEndedEvent(snapshot=self._snapshot)
             )
+            self._match_state = "in_progress"
             self._end_warmup_handle = None
 
         missing_deaths = {}
